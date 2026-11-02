@@ -1,0 +1,89 @@
+name: OpenVoice
+options:
+  bundleIdPrefix: org.openvoice
+settings:
+  base:
+    SWIFT_VERSION: 6.0
+    IPHONEOS_DEPLOYMENT_TARGET: 26.0
+    TARGETED_DEVICE_FAMILY: "1,2"
+packages:
+  ZIPFoundation:
+    url: https://github.com/weichsel/ZIPFoundation.git
+    from: 0.9.0
+targets:
+  OpenVoice:
+    type: application
+    platform: iOS
+    sources:
+      - App
+      - Models
+      - Features
+      - path: Resources/Soundscapes
+        type: folder
+        buildPhase: resources
+      - path: Resources/SoundBoard
+        type: folder
+        buildPhase: resources
+    dependencies:
+      - package: ZIPFoundation
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: org.openvoice.aac
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_KEY_CFBundleDisplayName: Open Voice
+        INFOPLIST_KEY_UIApplicationSceneManifest_Generation: YES
+        INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents: YES
+        INFOPLIST_KEY_NSSupportsLiveActivities: NO
+        ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS: YES
+    info:
+      path: Resources/Info.plist
+      properties:
+        NSMicrophoneUsageDescription: Record personal voices and spoken choices for communication.
+        NSCameraUsageDescription: Take personal photos for communication buttons, routines, scenes, stories, and calendars, and scan shared page QR codes.
+        NSMicrophoneInjectionUsageDescription: Add Open Voice speech to a call when you choose to use call audio.
+        NSFaceIDUsageDescription: Use device authentication to leave board-only communicator mode.
+        NSSpeechRecognitionUsageDescription: Turn spoken choices into editable text using on-device speech recognition.
+        NSLocalNetworkUsageDescription: Find and exchange messages with nearby Open Voice devices when you start Nearby chat.
+        NSBonjourServices:
+          - _ov-aac-chat._tcp
+        UILaunchScreen: {}
+        UTExportedTypeDeclarations:
+          - UTTypeIdentifier: org.openvoice.open-board-format
+            UTTypeDescription: Open Board Format board
+            UTTypeConformsTo: [public.json]
+            UTTypeTagSpecification:
+              public.filename-extension: [obf]
+              public.mime-type: [application/vnd.open-board-format]
+          - UTTypeIdentifier: org.openvoice.open-board-archive
+            UTTypeDescription: Open Board Format archive
+            UTTypeConformsTo: [public.zip-archive]
+            UTTypeTagSpecification:
+              public.filename-extension: [obz]
+              public.mime-type: [application/vnd.open-board-format-archive]
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+          - UIInterfaceOrientationPortraitUpsideDown
+  OpenVoiceTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - Tests
+    dependencies:
+      - target: OpenVoice
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: org.openvoice.aac.tests
+        GENERATE_INFOPLIST_FILE: YES
+  OpenVoiceUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources:
+      - UITests
+    dependencies:
+      - target: OpenVoice
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: org.openvoice.aac.uitests
+        GENERATE_INFOPLIST_FILE: YES
