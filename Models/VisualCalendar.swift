@@ -92,6 +92,8 @@ struct CalendarEvent: Identifiable, Codable, Equatable {
     var completedOn: [Date] = []
     var reminder: CalendarEventReminder? = nil
     var colorHex: String? = nil
+    var rewardChartID: UUID? = nil
+    var rewardedDates: [Date]? = nil
 
     func occurs(on date: Date, calendar: Calendar = .current) -> Bool {
         let day = calendar.startOfDay(for: date)
@@ -139,6 +141,10 @@ struct CalendarEvent: Identifiable, Codable, Equatable {
     func isComplete(on date: Date, calendar: Calendar = .current) -> Bool {
         completedOn.contains { calendar.isDate($0, inSameDayAs: date) }
     }
+
+    func hasEarnedReward(on date: Date, calendar: Calendar = .current) -> Bool {
+        rewardedDates?.contains { calendar.isDate($0, inSameDayAs: date) } == true
+    }
 }
 
 struct VisualCalendar: Codable, Equatable {
@@ -182,6 +188,21 @@ struct VisualCalendar: Codable, Equatable {
             events[index].completedOn.removeAll { calendar.isDate($0, inSameDayAs: date) }
         } else {
             events[index].completedOn.append(calendar.startOfDay(for: date))
+        }
+    }
+
+    mutating func markRewarded(id: UUID, on date: Date, calendar: Calendar = .current) {
+        guard let index = events.firstIndex(where: { $0.id == id }),
+              !events[index].hasEarnedReward(on: date, calendar: calendar) else { return }
+        events[index].rewardedDates = (events[index].rewardedDates ?? []) + [calendar.startOfDay(for: date)]
+    }
+
+    mutating func removeMissingRewardCharts(validIDs: Set<UUID>) {
+        for index in events.indices {
+            if let id = events[index].rewardChartID, !validIDs.contains(id) {
+                events[index].rewardChartID = nil
+                events[index].rewardedDates = nil
+            }
         }
     }
 }

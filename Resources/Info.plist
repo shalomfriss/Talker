@@ -32,10 +32,12 @@
 	<string>Add Open Voice speech to a call when you choose to use call audio.</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Record personal voices and spoken choices for communication.</string>
+	<key>NSPhotoLibraryAddUsageDescription</key>
+	<string>Save selected pictograms to Photos so they can be used in other communication apps.</string>
 	<key>NSSpeechRecognitionUsageDescription</key>
 	<string>Turn spoken choices into editable text using on-device speech recognition.</string>
-	<key>UILaunchScreen</key>
-	<dict/>
+	<key>UILaunchStoryboardName</key>
+	<string>LaunchScreen</string>
 	<key>UISupportedInterfaceOrientations</key>
 	<array>
 		<string>UIInterfaceOrientationPortrait</string>

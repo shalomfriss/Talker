@@ -4,8 +4,11 @@ import UIKit
 struct AttentionAlertView: View {
     @EnvironmentObject private var store: CommunicationStore
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.scenePhase) private var scenePhase
     @State private var hasAnnounced = false
     @State private var facingPartner = false
+    @State private var isRepeating = false
+    @State private var repeatTask: Task<Void, Never>?
     @ScaledMetric(relativeTo: .largeTitle) private var messageFontSize = 44
 
     var body: some View {
@@ -32,6 +35,21 @@ struct AttentionAlertView: View {
                     .tint(store.settings.highContrast ? .black : .indigo)
                     .controlSize(.large)
                     .accessibilityIdentifier("repeat-attention")
+                    .disabled(isRepeating)
+                Button(isRepeating ? "Stop repeating" : "Repeat until stopped",
+                       systemImage: isRepeating ? "stop.fill" : "repeat") {
+                    if isRepeating { stopRepeating() } else { startRepeating() }
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(isRepeating ? .red : (store.settings.highContrast ? .black : .indigo))
+                .controlSize(.large)
+                .accessibilityIdentifier("attention-auto-repeat")
+                if isRepeating {
+                    Text("The message repeats after each spoken announcement. It stops when you leave this screen.")
+                        .font(.footnote)
+                        .multilineTextAlignment(.center)
+                        .foregroundStyle(.secondary)
+                }
                 Button(facingPartner ? "Face me" : "Face partner", systemImage: "arrow.triangle.2.circlepath") {
                     facingPartner.toggle()
                 }
@@ -52,7 +70,34 @@ struct AttentionAlertView: View {
                 hasAnnounced = true
                 announce()
             }
+            .onDisappear { if isRepeating { stopRepeating() } }
+            .onChange(of: scenePhase) { _, phase in
+                if phase != .active && isRepeating { stopRepeating() }
+            }
         }
+    }
+
+    private func startRepeating() {
+        guard !isRepeating else { return }
+        isRepeating = true
+        repeatTask = Task { @MainActor in
+            while !Task.isCancelled {
+                while store.isSpeechOutputActive {
+                    do { try await Task.sleep(for: .milliseconds(250)) } catch { return }
+                }
+                do { try await Task.sleep(for: .seconds(2)) } catch { return }
+                guard !Task.isCancelled else { return }
+                guard !store.isSpeechOutputActive else { continue }
+                announce()
+            }
+        }
+    }
+
+    private func stopRepeating() {
+        repeatTask?.cancel()
+        repeatTask = nil
+        isRepeating = false
+        store.stopSpeaking()
     }
 
     private func announce() {

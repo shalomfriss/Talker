@@ -9,6 +9,12 @@ struct LearnedPredictionEntry: Codable, Equatable {
 }
 
 struct LearnedPredictionModel: Codable, Equatable {
+    private struct EntryKey: Hashable {
+        var language: String
+        var context: [String]
+        var word: String
+    }
+
     private(set) var entries: [LearnedPredictionEntry] = []
     private(set) var generation = 0
 
@@ -20,6 +26,13 @@ struct LearnedPredictionModel: Codable, Equatable {
     mutating func learn(_ text: String, language: String) {
         guard !text.isEmpty, text.count <= 500 else { return }
         generation += 1
+        var entryIndices: [EntryKey: Int] = [:]
+        entryIndices.reserveCapacity(entries.count)
+        for (index, entry) in entries.enumerated() {
+            let key = EntryKey(language: entry.language, context: entry.context,
+                               word: Self.key(entry.word, language: entry.language))
+            if entryIndices[key] == nil { entryIndices[key] = index }
+        }
         for segment in text.split(whereSeparator: { ".?!;\n".contains($0) }) {
             let tokens = Self.words(in: String(segment)).filter { $0.count <= 24 }
             guard !tokens.isEmpty, tokens.count <= 100 else { continue }
@@ -36,11 +49,11 @@ struct LearnedPredictionModel: Codable, Equatable {
                                      Self.key(tokens[index - 1], language: language)])
                 }
                 for context in contexts {
-                    record(word, after: context, language: language)
+                    record(word, after: context, language: language, entryIndices: &entryIndices)
                 }
             }
             let endContext = tokens.suffix(2).map { Self.key($0, language: language) }
-            record(Self.sentenceEnd, after: endContext, language: language)
+            record(Self.sentenceEnd, after: endContext, language: language, entryIndices: &entryIndices)
         }
         if entries.count > Self.maximumEntries {
             entries.sort {
@@ -51,7 +64,8 @@ struct LearnedPredictionModel: Codable, Equatable {
         }
     }
 
-    func suggestions(for text: String, language: String, limit: Int) -> [String] {
+    func suggestions(for text: String, language: String, limit: Int,
+                     allowedWords: Set<String>? = nil) -> [String] {
         guard limit > 0 else { return [] }
         let activeRange = text.range(of: #"\p{L}[\p{L}\p{M}'’-]*$"#, options: .regularExpression)
         let prefix = activeRange.map { Self.key(String(text[$0]), language: language) }
@@ -71,6 +85,7 @@ struct LearnedPredictionModel: Codable, Equatable {
             if prefix == nil && entry.context.isEmpty { continue }
             let wordKey = Self.key(entry.word, language: language)
             if let prefix, (!wordKey.hasPrefix(prefix) || wordKey == prefix) { continue }
+            if let allowedWords, !allowedWords.contains(entry.word.lowercased()) { continue }
             let multiplier = entry.context.count == 2 ? 9 : (entry.context.count == 1 ? 3 : 1)
             let old = scores[wordKey]
             scores[wordKey] = (entry.word, (old?.score ?? 0) + entry.count * multiplier,
@@ -89,6 +104,14 @@ struct LearnedPredictionModel: Codable, Equatable {
         let typed = Self.words(in: prefix)
         guard limit > 0, !typed.isEmpty, typed.count <= 12 else { return [] }
         let trailingSpace = prefix.last?.isWhitespace == true
+        let optionsByContext = Dictionary(grouping: entries.filter {
+            $0.language == language && $0.count >= 2
+        }, by: \.context).mapValues { options in
+            options.sorted {
+                if $0.count != $1.count { return $0.count > $1.count }
+                return $0.lastSeen > $1.lastSeen
+            }
+        }
         struct State {
             var words: [String]
             var score: Int
@@ -107,12 +130,7 @@ struct LearnedPredictionModel: Codable, Equatable {
                 } else {
                     context = state.words.suffix(2).map { Self.key($0, language: language) }
                 }
-                let options = entries.filter {
-                    $0.language == language && $0.context == context && $0.count >= 2
-                }.sorted {
-                    if $0.count != $1.count { return $0.count > $1.count }
-                    return $0.lastSeen > $1.lastSeen
-                }
+                let options = optionsByContext[context] ?? []
                 for option in options.prefix(4) {
                     if option.word == Self.sentenceEnd {
                         if state.words.count >= max(2, typed.count) { results.append(state) }
@@ -154,14 +172,14 @@ struct LearnedPredictionModel: Codable, Equatable {
         generation = 0
     }
 
-    private mutating func record(_ word: String, after context: [String], language: String) {
-        if let existing = entries.firstIndex(where: {
-            $0.language == language && $0.context == context &&
-                Self.key($0.word, language: language) == Self.key(word, language: language)
-        }) {
+    private mutating func record(_ word: String, after context: [String], language: String,
+                                 entryIndices: inout [EntryKey: Int]) {
+        let key = EntryKey(language: language, context: context, word: Self.key(word, language: language))
+        if let existing = entryIndices[key] {
             entries[existing].count = min(1_000, entries[existing].count + 1)
             entries[existing].lastSeen = generation
         } else {
+            entryIndices[key] = entries.count
             entries.append(LearnedPredictionEntry(language: language, context: context,
                                                   word: word, count: 1, lastSeen: generation))
         }

@@ -73,15 +73,21 @@ struct LocalBackupLibrary {
     }
 
     func load(id: UUID, profileID: UUID) throws -> Data {
+        let data = try loadRaw(id: id, profileID: profileID)
+        guard (try? JSONDecoder().decode(StoredData.self, from: data)) != nil else {
+            throw LocalBackupError.invalidBackup
+        }
+        return data
+    }
+
+    func loadRaw(id: UUID, profileID: UUID) throws -> Data {
         let folder = snapshotDirectory(id, profileID: profileID)
         guard let metadata = try? Data(contentsOf: folder.appendingPathComponent("info.json")),
               let snapshot = try? JSONDecoder().decode(LocalBackupSnapshot.self, from: metadata),
               snapshot.id == id, snapshot.profileID == profileID,
-              let data = try? Data(contentsOf: folder.appendingPathComponent("backup.json"))
+              let data = try? Data(contentsOf: folder.appendingPathComponent("backup.json"),
+                                   options: .mappedIfSafe)
         else { throw LocalBackupError.missingBackup }
-        guard (try? JSONDecoder().decode(StoredData.self, from: data)) != nil else {
-            throw LocalBackupError.invalidBackup
-        }
         return data
     }
 

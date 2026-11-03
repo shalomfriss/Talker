@@ -5,14 +5,21 @@ struct VisualMessagePart: Equatable {
     var itemID: UUID?
     var symbol: String?
     var imageData: Data?
+    var arasaacPictogramID: Int? = nil
 }
 
 enum VisualMessagePictureSelection: Equatable {
     case textOnly
     case item(UUID)
+    case pictogram(Data, Int)
 }
 
 enum VisualMessageConversion {
+    private final class MatchNode {
+        var children: [String: MatchNode] = [:]
+        var item: CommunicationItem?
+    }
+
     static func convert(_ text: String, items: [CommunicationItem],
                         label: (CommunicationItem) -> String,
                         message: (CommunicationItem) -> String,
@@ -20,35 +27,43 @@ enum VisualMessageConversion {
         let words = text.split(whereSeparator: \.isWhitespace).map(String.init)
         guard !words.isEmpty else { return [] }
         let normalized = words.map(normalize)
-        let candidates = items.filter {
-            $0.effectiveAction == .addToMessage && $0.boardVisibility != .hidden
-        }.flatMap { item -> [(item: CommunicationItem, words: [String])] in
-            let names = [label(item), message(item)]
-            return Array(Set(names)).compactMap { name in
+        let root = MatchNode()
+        var selectableItems: [UUID: CommunicationItem] = [:]
+        for item in items where item.effectiveAction == .addToMessage && item.boardVisibility != .hidden {
+            if selectableItems[item.id] == nil { selectableItems[item.id] = item }
+            for name in Set([label(item), message(item)]) {
                 let parts = name.split(whereSeparator: \.isWhitespace).map { normalize(String($0)) }
-                return parts.isEmpty || parts.contains("") ? nil : (item, parts)
+                guard !parts.isEmpty && !parts.contains("") else { continue }
+                var node = root
+                for part in parts {
+                    if node.children[part] == nil { node.children[part] = MatchNode() }
+                    node = node.children[part]!
+                }
+                if let current = node.item {
+                    if isPreferred(item, over: current) { node.item = item }
+                } else {
+                    node.item = item
+                }
             }
-        }.sorted { left, right in
-            if left.words.count != right.words.count { return left.words.count > right.words.count }
-            let leftScore = (left.item.imageData == nil ? 0 : 4) + (left.item.isCustom ? 2 : 0)
-                + (left.item.symbol.isEmpty ? 0 : 1)
-            let rightScore = (right.item.imageData == nil ? 0 : 4) + (right.item.isCustom ? 2 : 0)
-                + (right.item.symbol.isEmpty ? 0 : 1)
-            if leftScore != rightScore { return leftScore > rightScore }
-            return left.item.id.uuidString < right.item.id.uuidString
         }
 
         var result: [VisualMessagePart] = []
         var index = 0
         while index < words.count {
-            if let match = candidates.first(where: { candidate in
-                let end = index + candidate.words.count
-                return end <= words.count && normalized[index..<end].elementsEqual(candidate.words)
-            }) {
-                let end = index + match.words.count
+            var node = root
+            var cursor = index
+            var match: (item: CommunicationItem, end: Int)?
+            while cursor < words.count, let child = node.children[normalized[cursor]] {
+                node = child
+                cursor += 1
+                if let item = node.item { match = (item, cursor) }
+            }
+            if let match {
+                let end = match.end
                 result.append(VisualMessagePart(text: words[index..<end].joined(separator: " "),
                                                 itemID: match.item.id, symbol: match.item.symbol,
-                                                imageData: match.item.imageData))
+                                                imageData: match.item.imageData,
+                                                arasaacPictogramID: match.item.arasaacPictogramID))
                 index = end
             } else {
                 result.append(VisualMessagePart(text: words[index], itemID: nil,
@@ -62,13 +77,18 @@ enum VisualMessageConversion {
                 result[index].itemID = nil
                 result[index].symbol = nil
                 result[index].imageData = nil
+                result[index].arasaacPictogramID = nil
             case .item(let id):
-                let selected = items.first {
-                    $0.id == id && $0.effectiveAction == .addToMessage && $0.boardVisibility != .hidden
-                }
+                let selected = selectableItems[id]
                 result[index].itemID = selected?.id
                 result[index].symbol = selected?.symbol
                 result[index].imageData = selected?.imageData
+                result[index].arasaacPictogramID = selected?.arasaacPictogramID
+            case .pictogram(let data, let id):
+                result[index].itemID = nil
+                result[index].symbol = nil
+                result[index].imageData = data
+                result[index].arasaacPictogramID = id
             }
         }
         return result
@@ -77,5 +97,15 @@ enum VisualMessageConversion {
     private static func normalize(_ text: String) -> String {
         text.trimmingCharacters(in: .punctuationCharacters.union(.symbols))
             .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
+    }
+
+    private static func isPreferred(_ candidate: CommunicationItem, over current: CommunicationItem) -> Bool {
+        func score(_ item: CommunicationItem) -> Int {
+            (item.imageData == nil ? 0 : 4) + (item.isCustom ? 2 : 0) + (item.symbol.isEmpty ? 0 : 1)
+        }
+        let candidateScore = score(candidate)
+        let currentScore = score(current)
+        if candidateScore != currentScore { return candidateScore > currentScore }
+        return candidate.id.uuidString < current.id.uuidString
     }
 }

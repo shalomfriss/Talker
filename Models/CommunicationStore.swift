@@ -1,6 +1,69 @@
 import AVFoundation
 import Foundation
 
+private final class SpeechVoiceResolver: @unchecked Sendable {
+    static let shared = SpeechVoiceResolver()
+
+    private let lock = NSLock()
+    private var voices: [String: AVSpeechSynthesisVoice] = [:]
+    private var requested: Set<String> = []
+
+    func language(_ code: String) -> AVSpeechSynthesisVoice? {
+        cachedOrRequest("language:\(code)") { AVSpeechSynthesisVoice(language: code) }
+    }
+
+    func identifier(_ identifier: String) -> AVSpeechSynthesisVoice? {
+        cachedOrRequest("identifier:\(identifier)") { AVSpeechSynthesisVoice(identifier: identifier) }
+    }
+
+    private func cachedOrRequest(_ key: String,
+                                 resolve: @escaping @Sendable () -> AVSpeechSynthesisVoice?) -> AVSpeechSynthesisVoice? {
+        lock.lock()
+        let cached = voices[key]
+        let needsRequest = cached == nil && requested.insert(key).inserted
+        lock.unlock()
+        if needsRequest {
+            DispatchQueue.global(qos: .userInitiated).async { [self] in
+                let voice = resolve()
+                lock.lock()
+                if let voice { voices[key] = voice }
+                lock.unlock()
+            }
+        }
+        return cached
+    }
+}
+
+private final class SpeechCommandQueue: @unchecked Sendable {
+    static let shared = SpeechCommandQueue()
+    private let queue = DispatchQueue(label: "org.openvoice.speech-playback", qos: .userInitiated)
+
+    func speak(_ utterance: AVSpeechUtterance, with synthesizer: AVSpeechSynthesizer,
+               language: String, preferredVoiceIdentifier: String = "") {
+        queue.async {
+            if utterance.voice == nil {
+                let selected = preferredVoiceIdentifier.isEmpty
+                    ? nil : AVSpeechSynthesisVoice(identifier: preferredVoiceIdentifier)
+                utterance.voice = selected?.language.hasPrefix(language) == true
+                    ? selected : AVSpeechSynthesisVoice(language: language)
+            }
+            synthesizer.speak(utterance)
+        }
+    }
+
+    func stop(_ synthesizer: AVSpeechSynthesizer) {
+        queue.async { _ = synthesizer.stopSpeaking(at: .immediate) }
+    }
+
+    func pause(_ synthesizer: AVSpeechSynthesizer) {
+        queue.async { _ = synthesizer.pauseSpeaking(at: .immediate) }
+    }
+
+    func resume(_ synthesizer: AVSpeechSynthesizer) {
+        queue.async { _ = synthesizer.continueSpeaking() }
+    }
+}
+
 struct PictureMessageToken: Equatable {
     var text: String
     var symbol: String?
@@ -18,6 +81,59 @@ private struct ReminderRestorePlans: @unchecked Sendable {
         weekly.append(contentsOf: other.weekly)
         calendar.append(contentsOf: other.calendar)
     }
+}
+
+struct ReminderProfileSnapshot: Decodable {
+    let routineTemplates: [RoutineTemplate]
+    let routineReminders: [RoutineReminder]
+    let weeklyPlan: WeeklyPlan
+    let visualCalendar: VisualCalendar
+
+    private enum CodingKeys: String, CodingKey {
+        case routineTemplates, routineReminders, weeklyPlan, visualCalendar
+    }
+
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        routineTemplates = try values.decodeIfPresent([RoutineTemplate].self, forKey: .routineTemplates) ?? []
+        routineReminders = try values.decodeIfPresent([RoutineReminder].self, forKey: .routineReminders) ?? []
+        weeklyPlan = try values.decodeIfPresent(WeeklyPlan.self, forKey: .weeklyPlan) ?? .init()
+        visualCalendar = try values.decodeIfPresent(VisualCalendar.self, forKey: .visualCalendar) ?? .init()
+    }
+}
+
+private struct WordSuggestionCacheKey: Equatable {
+    let profileID: UUID
+    let text: String
+    let itemsRevision: Int
+    let translationsRevision: Int
+    let contentRevision: Int
+    let language: String
+    let saveHistory: Bool
+    let learnPrediction: Bool
+}
+
+private struct WordSuggestionItemsKey: Equatable {
+    let profileID: UUID
+    let itemsRevision: Int
+    let translationsRevision: Int
+    let language: String
+}
+
+private struct SentenceSuggestionCacheKey: Equatable {
+    let profileID: UUID
+    let text: String
+    let contentRevision: Int
+    let language: String
+    let saveHistory: Bool
+    let learnPrediction: Bool
+}
+
+private struct BoardVoiceCacheKey: Equatable {
+    let profileID: UUID
+    let itemsRevision: Int
+    let assignments: [String: String]
+    let identifiers: [String: String]
 }
 
 private struct ProfileSaveSnapshot: @unchecked Sendable {
@@ -61,20 +177,255 @@ private final class ProfilePersistenceWriter: @unchecked Sendable {
     }
 }
 
+enum PictureLibraryError: LocalizedError {
+    case invalidPicture
+    case invalidTitle
+    case limitReached
+    case busy
+    case profileChanged
+
+    var errorDescription: String? {
+        switch self {
+        case .invalidPicture: "Choose a valid picture under 2 MB."
+        case .invalidTitle: "Give the picture a name."
+        case .limitReached: "The picture library can hold up to 100 pictures."
+        case .busy: "Finish saving the current picture first."
+        case .profileChanged: "The active profile changed. Open its picture library and try again."
+        }
+    }
+}
+
+private enum PictureLibraryDiskStore {
+    static let maximumCount = 100
+    static let maximumPictureBytes = 2 * 1_048_576
+
+    private static func url(for profileID: UUID, in directory: URL) -> URL {
+        directory.appendingPathComponent("picture-library-\(profileID.uuidString).json")
+    }
+
+    static func load(for profileID: UUID, in directory: URL) throws -> [PersonalPicture] {
+        let file = url(for: profileID, in: directory)
+        guard FileManager.default.fileExists(atPath: file.path) else { return [] }
+        let pictures = try JSONDecoder().decode([PersonalPicture].self, from: Data(contentsOf: file))
+        try validate(pictures)
+        return pictures
+    }
+
+    static func save(_ pictures: [PersonalPicture], for profileID: UUID, in directory: URL) throws {
+        try validate(pictures)
+        try JSONEncoder().encode(pictures).write(to: url(for: profileID, in: directory), options: .atomic)
+    }
+
+    static func delete(for profileID: UUID, in directory: URL) {
+        try? FileManager.default.removeItem(at: url(for: profileID, in: directory))
+    }
+
+    private static func validate(_ pictures: [PersonalPicture]) throws {
+        guard pictures.count <= maximumCount else { throw PictureLibraryError.limitReached }
+        guard pictures.allSatisfy({ !$0.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
+            !$0.imageData.isEmpty && $0.imageData.count <= maximumPictureBytes }) else {
+            throw PictureLibraryError.invalidPicture
+        }
+    }
+}
+
+enum LifeNotebookError: LocalizedError {
+    case invalidPost
+    case invalidReply
+    case limitReached
+    case replyLimitReached
+    case busy
+    case profileChanged
+    case postMissing
+
+    var errorDescription: String? {
+        switch self {
+        case .invalidPost: "Add a title and valid words or media. Photos can be up to 2 MB, videos up to 8 MB, and picture words up to 512 KB each."
+        case .invalidReply: "Write a reply of up to 500 characters."
+        case .limitReached: "The life notebook can hold 100 posts, eight picture words per post, up to 20 MB of photos, and 30 MB of media in total."
+        case .replyLimitReached: "This moment can hold up to 40 conversation turns."
+        case .busy: "Finish saving the current notebook post first."
+        case .profileChanged: "The active profile changed. Open its notebook and try again."
+        case .postMissing: "This moment is no longer in the active notebook."
+        }
+    }
+}
+
+private enum LifeNotebookDiskStore {
+    static let maximumPosts = 100
+    static let maximumPhotoBytes = 2 * 1_048_576
+    static let maximumTotalPhotoBytes = 20 * 1_048_576
+    static let maximumVideoBytes = 8 * 1_048_576
+    static let maximumPictograms = 8
+    static let maximumPictogramBytes = 512 * 1_024
+    static let maximumReplies = 40
+    static let maximumTotalMediaBytes = 30 * 1_048_576
+
+    private static func url(for profileID: UUID, in directory: URL) -> URL {
+        directory.appendingPathComponent("life-notebook-\(profileID.uuidString).json")
+    }
+
+    static func load(for profileID: UUID, in directory: URL) throws -> [LifeNotebookPost] {
+        let file = url(for: profileID, in: directory)
+        guard FileManager.default.fileExists(atPath: file.path) else { return [] }
+        let posts = try JSONDecoder().decode([LifeNotebookPost].self, from: Data(contentsOf: file))
+        try validate(posts)
+        return posts
+    }
+
+    static func save(_ posts: [LifeNotebookPost], for profileID: UUID, in directory: URL) throws {
+        try validate(posts)
+        try JSONEncoder().encode(posts.sorted { $0.occurredAt > $1.occurredAt })
+            .write(to: url(for: profileID, in: directory), options: .atomic)
+    }
+
+    static func delete(for profileID: UUID, in directory: URL) {
+        try? FileManager.default.removeItem(at: url(for: profileID, in: directory))
+    }
+
+    static func validate(_ posts: [LifeNotebookPost]) throws {
+        guard posts.count <= maximumPosts else { throw LifeNotebookError.limitReached }
+        var photoBytes = 0
+        var mediaBytes = 0
+        var seenIDs = Set<UUID>()
+        for post in posts {
+            guard seenIDs.insert(post.id).inserted,
+                  !post.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                  post.title.count <= 80, post.topic.count <= 40, post.text.count <= 1_000,
+                  !post.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ||
+                  post.photoData != nil || !(post.pictograms ?? []).isEmpty else {
+                throw LifeNotebookError.invalidPost
+            }
+            let pictograms = post.pictograms ?? []
+            guard pictograms.count <= maximumPictograms else { throw LifeNotebookError.limitReached }
+            var pictogramIDs = Set<UUID>()
+            for pictogram in pictograms {
+                guard pictogramIDs.insert(pictogram.id).inserted,
+                      !pictogram.label.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                      pictogram.label.count <= 40, pictogram.symbol.count <= 12,
+                      pictogram.arasaacPictogramID == nil || pictogram.imageData != nil else {
+                    throw LifeNotebookError.invalidPost
+                }
+                if let image = pictogram.imageData {
+                    guard !image.isEmpty, image.count <= maximumPictogramBytes else {
+                        throw LifeNotebookError.invalidPost
+                    }
+                    mediaBytes += image.count
+                }
+            }
+            let replies = post.replies ?? []
+            guard replies.count <= maximumReplies else { throw LifeNotebookError.replyLimitReached }
+            var replyIDs = Set<UUID>()
+            for reply in replies {
+                guard replyIDs.insert(reply.id).inserted,
+                      !reply.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                      reply.text.count <= 500 else { throw LifeNotebookError.invalidReply }
+            }
+            if let photo = post.photoData {
+                guard !photo.isEmpty, photo.count <= maximumPhotoBytes else {
+                    throw LifeNotebookError.invalidPost
+                }
+                photoBytes += photo.count
+                mediaBytes += photo.count
+                guard photoBytes <= maximumTotalPhotoBytes else { throw LifeNotebookError.limitReached }
+            }
+            if let video = post.videoData {
+                guard !video.isEmpty, video.count <= maximumVideoBytes,
+                      post.photoData != nil else { throw LifeNotebookError.invalidPost }
+                mediaBytes += video.count
+            }
+            guard mediaBytes <= maximumTotalMediaBytes else { throw LifeNotebookError.limitReached }
+        }
+    }
+}
+
+enum LifeNotebookTransferError: LocalizedError {
+    case tooLarge
+    case unsupportedFormat
+
+    var errorDescription: String? {
+        switch self {
+        case .tooLarge: "This moment file is too large. Choose one under 24 MB."
+        case .unsupportedFormat: "This is not a supported Open Voice moment file."
+        }
+    }
+}
+
+struct LifeNotebookTransfer: Codable {
+    static let maxImportBytes = 24 * 1_048_576
+    private static let formatName = "org.openvoice.life-notebook-post"
+
+    let format: String
+    let version: Int
+    let post: LifeNotebookPost
+
+    static func exportData(_ post: LifeNotebookPost) throws -> Data {
+        try LifeNotebookDiskStore.validate([post])
+        let data = try JSONEncoder().encode(Self(format: formatName, version: 1, post: post))
+        guard data.count <= maxImportBytes else { throw LifeNotebookTransferError.tooLarge }
+        return data
+    }
+
+    static func importPost(_ data: Data) throws -> LifeNotebookPost {
+        guard data.count <= maxImportBytes else { throw LifeNotebookTransferError.tooLarge }
+        let transfer: Self
+        do {
+            transfer = try JSONDecoder().decode(Self.self, from: data)
+        } catch {
+            throw LifeNotebookTransferError.unsupportedFormat
+        }
+        guard transfer.format == formatName, transfer.version == 1 else {
+            throw LifeNotebookTransferError.unsupportedFormat
+        }
+        try LifeNotebookDiskStore.validate([transfer.post])
+        var copy = transfer.post
+        copy.id = UUID()
+        copy.createdAt = .now
+        copy.updatedAt = .now
+        copy.pictograms = copy.pictograms?.map { picture in
+            var copy = picture
+            copy.id = UUID()
+            return copy
+        }
+        copy.replies = copy.replies?.map { reply in
+            var copy = reply
+            copy.id = UUID()
+            return copy
+        }
+        return copy
+    }
+}
+
 @MainActor
 final class CommunicationStore: ObservableObject {
-    @Published private(set) var items: [CommunicationItem]
+    @Published private(set) var items: [CommunicationItem] {
+        didSet { itemsRevision &+= 1 }
+    }
+    private(set) var itemsRevision = 0
     @Published private(set) var categories: [String]
     @Published private(set) var routines: [RoutineStep]
     @Published private(set) var routineHistory: [RoutineRun]
     @Published private(set) var routineTemplates: [RoutineTemplate]
     @Published private(set) var routineReminders: [RoutineReminder]
-    @Published private(set) var phrases: [SavedPhrase]
+    @Published private(set) var phrases: [SavedPhrase] {
+        didSet { predictionInputRevision &+= 1 }
+    }
     @Published private(set) var jokes: [Joke]
-    @Published private(set) var history: [SpokenMessage]
+    @Published private(set) var history: [SpokenMessage] {
+        didSet { predictionInputRevision &+= 1 }
+    }
+    @Published private(set) var usageEvents: [CommunicationUsageEvent]
     @Published private(set) var notes: [CommunicationNote]
     @Published private(set) var savedReadingDocuments: [SavedReadingDocument]
-    @Published private(set) var learnedPrediction: LearnedPredictionModel
+    @Published private(set) var pictureLibrary: [PersonalPicture] = []
+    private var loadedPictureLibraryProfileID: UUID?
+    private var isSavingPictureLibrary = false
+    @Published private(set) var lifeNotebookPosts: [LifeNotebookPost] = []
+    private var loadedLifeNotebookProfileID: UUID?
+    private var isSavingLifeNotebook = false
+    @Published private(set) var learnedPrediction: LearnedPredictionModel {
+        didSet { predictionInputRevision &+= 1 }
+    }
     @Published private(set) var feelingsLog: [FeelingLogEntry]
     @Published private(set) var stories: [VisualStory]
     @Published private(set) var choiceBoards: [ChoiceBoard]
@@ -90,11 +441,15 @@ final class CommunicationStore: ObservableObject {
     @Published private(set) var rewardCharts: [RewardChart]
     @Published private(set) var rewardCollectibles: [RewardCollectible]
     @Published private(set) var passport: CommunicationPassport
-    @Published private(set) var wordTranslations: [String: [String: WordTranslation]]
+    @Published private(set) var wordTranslations: [String: [String: WordTranslation]] {
+        didSet { wordTranslationsRevision &+= 1 }
+    }
+    private(set) var wordTranslationsRevision = 0
     @Published private(set) var profiles: [CommunicationProfile]
     @Published private(set) var activeProfileID: UUID
     @Published private(set) var conversations: [ConversationDraft]
     @Published private(set) var activeConversationID: UUID
+    @Published private var privateConversation: ConversationDraft? = nil
     @Published private(set) var drawingStrokes: [DrawingStroke]
     @Published private(set) var speechTopics: [SpeechTopic]
     @Published private(set) var nearbyMessages: [NearbyChatMessage]
@@ -103,6 +458,9 @@ final class CommunicationStore: ObservableObject {
     @Published private(set) var isCalendarEditingUnlocked = false
     @Published var settings: AppSettings { didSet {
         if !isLoadingConversation {
+            if settings.quickResponses != oldValue.quickResponses {
+                predictionInputRevision &+= 1
+            }
             if settings.speechMuted && !oldValue.speechMuted {
                 Task { @MainActor in
                     if self.settings.speechMuted { self.stopSpeaking() }
@@ -114,6 +472,7 @@ final class CommunicationStore: ObservableObject {
             }
             if !settings.autoClearAfterSpeaking {
                 for index in conversations.indices { conversations[index].clearOnNextSelection = false }
+                privateConversation?.clearOnNextSelection = false
             }
             save()
         }
@@ -122,6 +481,7 @@ final class CommunicationStore: ObservableObject {
     private(set) var messagePartLanguages: [String] = []
     private(set) var messagePartBases: [String] = []
     private(set) var messagePartItemIDs: [UUID?] = []
+    private var messagePartPictureOverrides: [MessagePictureOverride?] = []
     @Published var typedMessage = "" { didSet {
         if let pendingPhrasePrefix, !typedMessage.hasSuffix(pendingPhrasePrefix) {
             self.pendingPhrasePrefix = nil
@@ -137,14 +497,15 @@ final class CommunicationStore: ObservableObject {
     @Published private(set) var activeStoryPlaybackID: UUID?
     @Published private(set) var completedStoryPlaybackID: UUID?
 
-    private let speaker = AVSpeechSynthesizer()
+    private var speaker: AVSpeechSynthesizer?
+    private var activeSpeechUtterances: Set<ObjectIdentifier> = []
     private let speechHighlightDelegate = SpeechHighlightDelegate()
     private let recordedPlaybackDelegate = RecordedPlaybackDelegate()
     private var speechHighlightSegments: [ObjectIdentifier: SpeechHighlightSegment] = [:]
     private var pendingMessageUtterances: Set<ObjectIdentifier> = []
     private var pendingMessageSource: SpeechHighlightSource?
     private var messagePlaybackUsesRecording = false
-    private let scanCueSpeaker = AVSpeechSynthesizer()
+    private var scanCueSpeaker: AVSpeechSynthesizer?
     private var scanCuePlayer: AVAudioPlayer?
     private var scanCueRequestID = UUID()
     private var typingPreviewActive = false
@@ -157,8 +518,24 @@ final class CommunicationStore: ObservableObject {
     private var draftSaveTask: Task<Void, Never>?
     private var saveTransactionDepth = 0
     private var saveRequested = false
+    private(set) var predictionContentRevision = 0
+    private var predictionInputRevision = 0
+    private var wordSuggestionCacheKey: WordSuggestionCacheKey?
+    private var wordSuggestionCache: [Int: [String]] = [:]
+    private var wordSuggestionItemsKey: WordSuggestionItemsKey?
+    private var wordSuggestionItems: [CommunicationItem] = []
+    private var sentenceSuggestionCacheKey: SentenceSuggestionCacheKey?
+    private var sentenceSuggestionCache: [Int: [String]] = [:]
+    private var boardVoiceCacheKey: BoardVoiceCacheKey?
+    private var boardVoiceByItemID: [UUID: String] = [:]
 #if DEBUG
+    private(set) var wordSuggestionComputationCount = 0
+    private(set) var wordSuggestionItemPreparationCount = 0
+    private(set) var sentenceSuggestionComputationCount = 0
     private(set) var persistenceWriteCount = 0
+    var speechEnginesInitialized: (primary: Bool, cue: Bool) {
+        (speaker != nil, scanCueSpeaker != nil)
+    }
 #endif
 
     func beginSettingsAdjustment() { saveTransactionDepth += 1 }
@@ -200,6 +577,7 @@ final class CommunicationStore: ObservableObject {
         phrases = stored.phrases
         jokes = stored.jokes
         history = stored.history
+        usageEvents = stored.usageEvents
         notes = stored.notes
         savedReadingDocuments = stored.savedReadingDocuments
         learnedPrediction = stored.learnedPrediction
@@ -207,8 +585,12 @@ final class CommunicationStore: ObservableObject {
         stories = stored.stories
         choiceBoards = stored.choiceBoards
         sceneBoards = stored.sceneBoards
-        weeklyPlan = stored.weeklyPlan
-        visualCalendar = stored.visualCalendar
+        var loadedWeeklyPlan = stored.weeklyPlan
+        loadedWeeklyPlan.removeMissingRewardCharts(validIDs: Set(stored.rewardCharts.map(\.id)))
+        weeklyPlan = loadedWeeklyPlan
+        var loadedVisualCalendar = stored.visualCalendar
+        loadedVisualCalendar.removeMissingRewardCharts(validIDs: Set(stored.rewardCharts.map(\.id)))
+        visualCalendar = loadedVisualCalendar
         rewardCharts = stored.rewardCharts
         rewardCollectibles = stored.rewardCollectibles
         passport = stored.passport
@@ -225,6 +607,7 @@ final class CommunicationStore: ObservableObject {
         messagePartLanguages = Self.languages(for: activeDraft, fallback: stored.settings.communicationLanguage)
         messagePartBases = Self.bases(for: activeDraft)
         messagePartItemIDs = Self.itemIDs(for: activeDraft)
+        messagePartPictureOverrides = Self.pictureOverrides(for: activeDraft)
         typedMessage = activeDraft.typedMessage
         typedCursorOffset = activeDraft.typedCursorOffset
         pendingPhrasePrefix = activeDraft.pendingPhrasePrefix
@@ -233,13 +616,16 @@ final class CommunicationStore: ObservableObject {
         }
         isBoardOnlyModeActive = settings.boardOnlyModeActive
         speechHighlightDelegate.store = self
-        speaker.delegate = speechHighlightDelegate
         recordedPlaybackDelegate.store = self
         if visualCalendar.isEditingLocked && CalendarEditingPINStore.isMissing(for: activeProfileID) {
             visualCalendar.editingLocked = false
             save()
         }
         if directoryNeedsSave { try? saveProfileDirectory() }
+        _ = SpeechVoiceResolver.shared.language(settings.communicationLanguage == "es" ? "es-ES" : "en-US")
+        if !settings.voiceIdentifier.isEmpty {
+            _ = SpeechVoiceResolver.shared.identifier(settings.voiceIdentifier)
+        }
     }
 
     var activeProfileName: String {
@@ -281,7 +667,44 @@ final class CommunicationStore: ObservableObject {
     }
 
     var activeConversationName: String {
-        conversations.first(where: { $0.id == activeConversationID })?.name ?? "Conversation"
+        if isPrivateConversationActive { return "Private conversation" }
+        return conversations.first(where: { $0.id == activeConversationID })?.name ?? "Conversation"
+    }
+
+    var isPrivateConversationActive: Bool { privateConversation != nil }
+
+    func beginPrivateConversation() {
+        guard !isBoardOnlyModeActive, !isPrivateConversationActive else { return }
+        updateActiveConversation(immediately: true)
+        stopSpeaking()
+        isLoadingConversation = true
+        privateConversation = ConversationDraft(name: "Private conversation")
+        messageParts = []
+        messagePartLanguages = []
+        messagePartBases = []
+        messagePartItemIDs = []
+        messagePartPictureOverrides = []
+        typedMessage = ""
+        typedCursorOffset = nil
+        pendingPhrasePrefix = nil
+        isLoadingConversation = false
+    }
+
+    func endPrivateConversation() {
+        guard isPrivateConversationActive,
+              let draft = conversations.first(where: { $0.id == activeConversationID }) else { return }
+        stopSpeaking()
+        isLoadingConversation = true
+        privateConversation = nil
+        messageParts = draft.messageParts
+        messagePartLanguages = Self.languages(for: draft, fallback: settings.communicationLanguage)
+        messagePartBases = Self.bases(for: draft)
+        messagePartItemIDs = Self.itemIDs(for: draft)
+        messagePartPictureOverrides = Self.pictureOverrides(for: draft)
+        typedMessage = draft.typedMessage
+        typedCursorOffset = draft.typedCursorOffset
+        pendingPhrasePrefix = draft.pendingPhrasePrefix
+        isLoadingConversation = false
     }
 
     @discardableResult
@@ -298,6 +721,7 @@ final class CommunicationStore: ObservableObject {
     @discardableResult
     func switchConversation(to id: UUID) -> Bool {
         guard let draft = conversations.first(where: { $0.id == id }) else { return false }
+        if isPrivateConversationActive { endPrivateConversation() }
         guard id != activeConversationID else { return true }
         updateActiveConversation(immediately: true)
         draftSaveTask?.cancel()
@@ -308,6 +732,7 @@ final class CommunicationStore: ObservableObject {
         messagePartLanguages = Self.languages(for: draft, fallback: settings.communicationLanguage)
         messagePartBases = Self.bases(for: draft)
         messagePartItemIDs = Self.itemIDs(for: draft)
+        messagePartPictureOverrides = Self.pictureOverrides(for: draft)
         typedMessage = draft.typedMessage
         typedCursorOffset = draft.typedCursorOffset
         pendingPhrasePrefix = draft.pendingPhrasePrefix
@@ -371,12 +796,17 @@ final class CommunicationStore: ObservableObject {
         guard !isBoardOnlyModeActive else { return false }
         guard let profile = profiles.first(where: { $0.id == id }) else { return false }
         guard id != activeProfileID else { return true }
+        if isPrivateConversationActive { endPrivateConversation() }
         updateActiveConversation(immediately: true)
         draftSaveTask?.cancel()
         stopSpeaking()
         isLoadingConversation = true
         fileURL = baseURL.deletingLastPathComponent().appendingPathComponent(profile.fileName)
         activeProfileID = id
+        pictureLibrary = []
+        loadedPictureLibraryProfileID = nil
+        lifeNotebookPosts = []
+        loadedLifeNotebookProfileID = nil
         let stored = Self.readData(from: fileURL)
         items = Self.cleanedItems(stored.items)
         categories = stored.categories
@@ -387,6 +817,7 @@ final class CommunicationStore: ObservableObject {
         phrases = stored.phrases
         jokes = stored.jokes
         history = stored.history
+        usageEvents = stored.usageEvents
         notes = stored.notes
         savedReadingDocuments = stored.savedReadingDocuments
         learnedPrediction = stored.learnedPrediction
@@ -397,6 +828,8 @@ final class CommunicationStore: ObservableObject {
         weeklyPlan = stored.weeklyPlan
         visualCalendar = stored.visualCalendar
         rewardCharts = stored.rewardCharts
+        weeklyPlan.removeMissingRewardCharts(validIDs: Set(rewardCharts.map(\.id)))
+        visualCalendar.removeMissingRewardCharts(validIDs: Set(rewardCharts.map(\.id)))
         rewardCollectibles = stored.rewardCollectibles
         isCalendarEditingUnlocked = false
         passport = stored.passport
@@ -413,6 +846,7 @@ final class CommunicationStore: ObservableObject {
         messagePartLanguages = Self.languages(for: activeDraft, fallback: stored.settings.communicationLanguage)
         messagePartBases = Self.bases(for: activeDraft)
         messagePartItemIDs = Self.itemIDs(for: activeDraft)
+        messagePartPictureOverrides = Self.pictureOverrides(for: activeDraft)
         typedMessage = activeDraft.typedMessage
         typedCursorOffset = activeDraft.typedCursorOffset
         pendingPhrasePrefix = activeDraft.pendingPhrasePrefix
@@ -448,7 +882,7 @@ final class CommunicationStore: ObservableObject {
 
     @discardableResult
     func deleteProfile(id: UUID) -> Bool {
-        guard !isBoardOnlyModeActive else { return false }
+        guard !isBoardOnlyModeActive, !isSavingPictureLibrary, !isSavingLifeNotebook else { return false }
         guard profiles.count > 1, let index = profiles.firstIndex(where: { $0.id == id }) else { return false }
         let profile = profiles[index]
         let savedData = Self.readData(from: baseURL.deletingLastPathComponent().appendingPathComponent(profile.fileName))
@@ -461,6 +895,8 @@ final class CommunicationStore: ObservableObject {
         do {
             try saveProfileDirectory()
             try? FileManager.default.removeItem(at: baseURL.deletingLastPathComponent().appendingPathComponent(profile.fileName))
+            PictureLibraryDiskStore.delete(for: id, in: baseURL.deletingLastPathComponent())
+            LifeNotebookDiskStore.delete(for: id, in: baseURL.deletingLastPathComponent())
             BoardOnlyPINStore.delete(for: id)
             CalendarEditingPINStore.delete(for: id)
             for reminder in remindersToCancel { RoutineReminderManager.cancel(reminder, profileID: id) }
@@ -473,12 +909,201 @@ final class CommunicationStore: ObservableObject {
         }
     }
 
+    func loadPersonalPictures() async throws {
+        let profileID = activeProfileID
+        guard loadedPictureLibraryProfileID != profileID else { return }
+        let directory = baseURL.deletingLastPathComponent()
+        let pictures = try await Task.detached(priority: .userInitiated) {
+            try PictureLibraryDiskStore.load(for: profileID, in: directory)
+        }.value
+        guard activeProfileID == profileID else { throw PictureLibraryError.profileChanged }
+        pictureLibrary = pictures
+        loadedPictureLibraryProfileID = profileID
+    }
+
+    @discardableResult
+    func addPersonalPicture(_ data: Data, title: String) async throws -> UUID {
+        try await loadPersonalPictures()
+        let profileID = activeProfileID
+        guard pictureLibrary.count < PictureLibraryDiskStore.maximumCount else {
+            throw PictureLibraryError.limitReached
+        }
+        let cleanTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleanTitle.isEmpty else { throw PictureLibraryError.invalidTitle }
+        let prepared = await PhotoProcessing.preparedDataAsync(from: data)
+        guard activeProfileID == profileID else { throw PictureLibraryError.profileChanged }
+        guard pictureLibrary.count < PictureLibraryDiskStore.maximumCount else {
+            throw PictureLibraryError.limitReached
+        }
+        guard let prepared,
+              !prepared.isEmpty, prepared.count <= PictureLibraryDiskStore.maximumPictureBytes else {
+            throw PictureLibraryError.invalidPicture
+        }
+        let picture = PersonalPicture(title: String(cleanTitle.prefix(80)), imageData: prepared)
+        try await persistPersonalPictures(pictureLibrary + [picture])
+        return picture.id
+    }
+
+    func renamePersonalPicture(_ id: UUID, title: String) async throws {
+        try await loadPersonalPictures()
+        let cleanTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleanTitle.isEmpty else { throw PictureLibraryError.invalidTitle }
+        guard let index = pictureLibrary.firstIndex(where: { $0.id == id }) else { return }
+        var updated = pictureLibrary
+        updated[index].title = String(cleanTitle.prefix(80))
+        try await persistPersonalPictures(updated)
+    }
+
+    func deletePersonalPicture(_ id: UUID) async throws {
+        try await loadPersonalPictures()
+        let updated = pictureLibrary.filter { $0.id != id }
+        guard updated.count != pictureLibrary.count else { return }
+        try await persistPersonalPictures(updated)
+    }
+
+    private func persistPersonalPictures(_ updated: [PersonalPicture]) async throws {
+        guard !isSavingPictureLibrary else { throw PictureLibraryError.busy }
+        isSavingPictureLibrary = true
+        defer { isSavingPictureLibrary = false }
+        let profileID = activeProfileID
+        let directory = baseURL.deletingLastPathComponent()
+        try await Task.detached(priority: .utility) {
+            try PictureLibraryDiskStore.save(updated, for: profileID, in: directory)
+        }.value
+        guard activeProfileID == profileID else { throw PictureLibraryError.profileChanged }
+        pictureLibrary = updated
+        loadedPictureLibraryProfileID = profileID
+    }
+
+    func loadLifeNotebook() async throws {
+        let profileID = activeProfileID
+        guard loadedLifeNotebookProfileID != profileID else { return }
+        let directory = baseURL.deletingLastPathComponent()
+        let posts = try await Task.detached(priority: .userInitiated) {
+            try LifeNotebookDiskStore.load(for: profileID, in: directory)
+        }.value
+        guard activeProfileID == profileID else { throw LifeNotebookError.profileChanged }
+        lifeNotebookPosts = posts.sorted { $0.occurredAt > $1.occurredAt }
+        loadedLifeNotebookProfileID = profileID
+    }
+
+    func saveLifeNotebookPost(_ post: LifeNotebookPost) async throws {
+        guard !isBoardOnlyModeActive else { throw LifeNotebookError.busy }
+        try await loadLifeNotebook()
+        var clean = post
+        clean.title = post.title.trimmingCharacters(in: .whitespacesAndNewlines)
+        clean.topic = post.topic.trimmingCharacters(in: .whitespacesAndNewlines)
+        clean.text = post.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        clean.pictograms = post.pictograms?.map { pictogram in
+            var cleanPictogram = pictogram
+            cleanPictogram.label = pictogram.label.trimmingCharacters(in: .whitespacesAndNewlines)
+            cleanPictogram.symbol = pictogram.symbol.trimmingCharacters(in: .whitespacesAndNewlines)
+            return cleanPictogram
+        }
+        clean.updatedAt = .now
+        var updated = lifeNotebookPosts
+        if let index = updated.firstIndex(where: { $0.id == clean.id }) {
+            clean.createdAt = updated[index].createdAt
+            updated[index] = clean
+        } else {
+            updated.insert(clean, at: 0)
+        }
+        try await persistLifeNotebook(updated)
+    }
+
+    func deleteLifeNotebookPost(id: UUID) async throws {
+        guard !isBoardOnlyModeActive else { throw LifeNotebookError.busy }
+        try await loadLifeNotebook()
+        let updated = lifeNotebookPosts.filter { $0.id != id }
+        guard updated.count != lifeNotebookPosts.count else { return }
+        try await persistLifeNotebook(updated)
+    }
+
+    func exportLifeNotebookPost(id: UUID) async throws -> Data {
+        try await loadLifeNotebook()
+        guard let post = lifeNotebookPosts.first(where: { $0.id == id }) else {
+            throw LifeNotebookError.invalidPost
+        }
+        return try await Task.detached(priority: .userInitiated) {
+            try LifeNotebookTransfer.exportData(post)
+        }.value
+    }
+
+    @discardableResult
+    func importLifeNotebookPost(_ data: Data) async throws -> LifeNotebookPost {
+        guard !isBoardOnlyModeActive else { throw LifeNotebookError.busy }
+        let profileID = activeProfileID
+        let post = try await Task.detached(priority: .userInitiated) {
+            try LifeNotebookTransfer.importPost(data)
+        }.value
+        guard activeProfileID == profileID else { throw LifeNotebookError.profileChanged }
+        try await saveLifeNotebookPost(post)
+        return post
+    }
+
+    @discardableResult
+    func addLifeNotebookReply(postID: UUID, speaker: LifeNotebookSpeaker,
+                              text: String) async throws -> LifeNotebookReply {
+        let clean = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !clean.isEmpty, clean.count <= 500 else { throw LifeNotebookError.invalidReply }
+        try await loadLifeNotebook()
+        guard let index = lifeNotebookPosts.firstIndex(where: { $0.id == postID }) else {
+            throw LifeNotebookError.postMissing
+        }
+        var updated = lifeNotebookPosts
+        var replies = updated[index].replies ?? []
+        guard replies.count < LifeNotebookDiskStore.maximumReplies else {
+            throw LifeNotebookError.replyLimitReached
+        }
+        let reply = LifeNotebookReply(speaker: speaker, text: clean)
+        replies.append(reply)
+        updated[index].replies = replies
+        updated[index].updatedAt = .now
+        try await persistLifeNotebook(updated)
+        return reply
+    }
+
+    func deleteLifeNotebookReply(postID: UUID, replyID: UUID) async throws {
+        guard !isBoardOnlyModeActive else { throw LifeNotebookError.busy }
+        try await loadLifeNotebook()
+        guard let index = lifeNotebookPosts.firstIndex(where: { $0.id == postID }) else {
+            throw LifeNotebookError.postMissing
+        }
+        var updated = lifeNotebookPosts
+        var replies = updated[index].replies ?? []
+        let previousCount = replies.count
+        replies.removeAll { $0.id == replyID }
+        guard replies.count != previousCount else { return }
+        updated[index].replies = replies
+        updated[index].updatedAt = .now
+        try await persistLifeNotebook(updated)
+    }
+
+    private func persistLifeNotebook(_ updated: [LifeNotebookPost]) async throws {
+        guard !isSavingLifeNotebook else { throw LifeNotebookError.busy }
+        isSavingLifeNotebook = true
+        defer { isSavingLifeNotebook = false }
+        let profileID = activeProfileID
+        let directory = baseURL.deletingLastPathComponent()
+        try await Task.detached(priority: .utility) {
+            try LifeNotebookDiskStore.save(updated, for: profileID, in: directory)
+        }.value
+        guard activeProfileID == profileID else { throw LifeNotebookError.profileChanged }
+        lifeNotebookPosts = updated.sorted { $0.occurredAt > $1.occurredAt }
+        loadedLifeNotebookProfileID = profileID
+    }
+
     var composedMessage: String {
         messageParts.joined(separator: " ").trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     var pictureMessageTokens: [PictureMessageToken] {
         messageParts.enumerated().map { index, text in
+            if messagePartPictureOverrides.indices.contains(index),
+               let picture = messagePartPictureOverrides[index] {
+                return PictureMessageToken(text: text, imageData: picture.imageData,
+                                           arasaacPictogramID: picture.arasaacPictogramID)
+            }
             let item = messagePartItemIDs.indices.contains(index)
                 ? items.first(where: { $0.id == messagePartItemIDs[index] }) : nil
             return PictureMessageToken(text: text, symbol: item?.symbol, imageData: item?.imageData,
@@ -505,14 +1130,22 @@ final class CommunicationStore: ObservableObject {
             messagePartLanguages.append(settings.communicationLanguage)
             messagePartBases.append(part.text)
             messagePartItemIDs.append(part.itemID)
+            if let imageData = part.imageData, let id = part.arasaacPictogramID,
+               part.itemID == nil {
+                messagePartPictureOverrides.append(MessagePictureOverride(imageData: imageData,
+                                                                           arasaacPictogramID: id))
+            } else {
+                messagePartPictureOverrides.append(nil)
+            }
         }
         updateActiveConversation(immediately: true)
         return true
     }
 
     var canUndoClearMessage: Bool {
-        messageParts.isEmpty && conversations.first(where: { $0.id == activeConversationID })?
-            .clearedPictureMessage != nil
+        guard messageParts.isEmpty else { return false }
+        if isPrivateConversationActive { return privateConversation?.clearedPictureMessage != nil }
+        return conversations.first(where: { $0.id == activeConversationID })?.clearedPictureMessage != nil
     }
 
     func translation(for item: CommunicationItem, language: String = "es") -> WordTranslation? {
@@ -526,16 +1159,71 @@ final class CommunicationStore: ObservableObject {
         return translation(for: item, language: settings.communicationLanguage)?.label ?? item.label
     }
 
+    func wordSuggestions(limit: Int = 5) -> [String] {
+        guard limit > 0 else { return [] }
+        let key = WordSuggestionCacheKey(
+            profileID: activeProfileID, text: typedMessage,
+            itemsRevision: itemsRevision, translationsRevision: wordTranslationsRevision,
+            contentRevision: predictionInputRevision, language: settings.communicationLanguage,
+            saveHistory: settings.saveHistory, learnPrediction: settings.learnPrediction)
+        if wordSuggestionCacheKey != key {
+            wordSuggestionCacheKey = key
+            wordSuggestionCache.removeAll(keepingCapacity: true)
+        }
+        if let cached = wordSuggestionCache[limit] { return cached }
+        let itemsKey = WordSuggestionItemsKey(
+            profileID: activeProfileID, itemsRevision: itemsRevision,
+            translationsRevision: wordTranslationsRevision,
+            language: settings.communicationLanguage)
+        if wordSuggestionItemsKey != itemsKey {
+            wordSuggestionItems = localizedItems(excludingPredictionKeys: true)
+            wordSuggestionItemsKey = itemsKey
+#if DEBUG
+            wordSuggestionItemPreparationCount += 1
+#endif
+        }
+#if DEBUG
+        wordSuggestionComputationCount += 1
+#endif
+        let suggestions = WordPrediction.suggestions(
+            for: typedMessage, items: wordSuggestionItems, phrases: phrases,
+            history: settings.saveHistory ? history : [],
+            learned: settings.learnPrediction ? learnedPrediction : nil,
+            language: settings.communicationLanguage, limit: limit)
+        wordSuggestionCache[limit] = suggestions
+        return suggestions
+    }
+
+    func sentenceSuggestions(limit: Int = 4) -> [String] {
+        guard limit > 0 else { return [] }
+        let key = SentenceSuggestionCacheKey(
+            profileID: activeProfileID, text: typedMessage,
+            contentRevision: predictionInputRevision,
+            language: settings.communicationLanguage,
+            saveHistory: settings.saveHistory, learnPrediction: settings.learnPrediction)
+        if sentenceSuggestionCacheKey != key {
+            sentenceSuggestionCacheKey = key
+            sentenceSuggestionCache.removeAll(keepingCapacity: true)
+        }
+        if let cached = sentenceSuggestionCache[limit] { return cached }
+#if DEBUG
+        sentenceSuggestionComputationCount += 1
+#endif
+        let suggestions = SentencePrediction.suggestions(
+            for: typedMessage, phrases: phrases,
+            quickResponses: settings.quickResponses,
+            history: settings.saveHistory ? history : [],
+            learned: settings.learnPrediction ? learnedPrediction : nil,
+            language: settings.communicationLanguage, limit: limit)
+        sentenceSuggestionCache[limit] = suggestions
+        return suggestions
+    }
+
     func typedPrediction(for item: CommunicationItem) -> String? {
         guard item.effectiveAction == .completeTypedPrediction,
               let slot = Int(item.message), (0..<3).contains(slot),
               (typedCursorOffset ?? typedMessage.count) == typedMessage.count else { return nil }
-        let sources = localizedItems(excludingPredictionKeys: true)
-        let suggestions = WordPrediction.suggestions(
-            for: typedMessage, items: sources, phrases: phrases,
-            history: settings.saveHistory ? history : [],
-            learned: settings.learnPrediction ? learnedPrediction : nil,
-            language: settings.communicationLanguage, limit: 3)
+        let suggestions = wordSuggestions(limit: 3)
         return suggestions.indices.contains(slot) ? suggestions[slot] : nil
     }
 
@@ -556,6 +1244,7 @@ final class CommunicationStore: ObservableObject {
         defer { finishSaveTransaction() }
         switch item.effectiveAction {
         case .addToMessage:
+            recordPictureUse(item)
             recordRecentPictureWord(item.id)
             let message = messageOverride ?? displayMessage(for: item)
             clearSpokenMessageBeforeSelection()
@@ -563,17 +1252,25 @@ final class CommunicationStore: ObservableObject {
             messagePartLanguages.append(settings.communicationLanguage)
             messagePartBases.append(message)
             messagePartItemIDs.append(item.id)
+            messagePartPictureOverrides.append(nil)
             updateActiveConversation(immediately: true)
             if speakFeedback {
                 if let audioData = item.audioData { playRecorded(audioData) }
-                else if settings.speakOnTap { speak(message) }
+                else if settings.speakOnTap {
+                    speak(message, voiceIdentifier: boardFolderVoiceIdentifier(for: item))
+                }
             }
         case .speakImmediately:
+            recordPictureUse(item)
             recordRecentPictureWord(item.id)
             let message = displayMessage(for: item)
             if let audioData = item.audioData { playRecorded(audioData) }
-            else { speak(message) }
-            saveSpokenMessage(message)
+            else { speak(message, voiceIdentifier: boardFolderVoiceIdentifier(for: item)) }
+            saveSpokenMessage(message, inputMode: .picture)
+        case .speakCurrentTime:
+            speak(SpokenClock.message(at: Date(), language: settings.communicationLanguage),
+                  language: settings.communicationLanguage,
+                  voiceIdentifier: boardFolderVoiceIdentifier(for: item))
         case .speakMessage:
             speakMessage()
         case .clearMessage:
@@ -651,18 +1348,21 @@ final class CommunicationStore: ObservableObject {
         saveTransactionDepth += 1
         defer { finishSaveTransaction() }
         if let itemID { recordRecentPictureWord(itemID) }
+        recordCommunicationUse(kind: .picturePhrase, label: selection.text,
+                               itemID: itemID)
         clearSpokenMessageBeforeSelection()
         messageParts.append(selection.text)
         messagePartLanguages.append(selection.language)
         messagePartBases.append(selection.text)
         messagePartItemIDs.append(itemID)
+        messagePartPictureOverrides.append(nil)
         updateActiveConversation(immediately: true)
         if let audioData, (try? AVAudioPlayer(data: audioData)) != nil {
             playRecorded(audioData)
         } else {
             speak(selection.text, language: selection.language)
         }
-        saveSpokenMessage(selection.text)
+        saveSpokenMessage(selection.text, inputMode: .picture)
     }
 
     var recentPictureItems: [CommunicationItem] {
@@ -683,16 +1383,21 @@ final class CommunicationStore: ObservableObject {
         let counts = Dictionary(uniqueKeysWithValues: settings.timeOfDayWordUses.map {
             ($0.itemID, $0.count(at: hour))
         })
-        let ranked = items.enumerated().filter { _, item in
-            item.category == board && item.isBoardSelectable(dimmedButtonsActive: settings.dimmedButtonsActive)
-                && (item.effectiveAction == .addToMessage || item.effectiveAction == .speakImmediately)
-                && (counts[item.id] ?? 0) >= 2
-        }.sorted { lhs, rhs in
-            let leftCount = counts[lhs.element.id] ?? 0
-            let rightCount = counts[rhs.element.id] ?? 0
-            return leftCount == rightCount ? lhs.offset < rhs.offset : leftCount > rightCount
+        var first: (id: UUID, count: Int)?
+        var second: (id: UUID, count: Int)?
+        for item in items where item.category == board &&
+            item.isBoardSelectable(dimmedButtonsActive: settings.dimmedButtonsActive) &&
+            (item.effectiveAction == .addToMessage || item.effectiveAction == .speakImmediately) {
+            let count = counts[item.id] ?? 0
+            guard count >= 2 else { continue }
+            if first == nil || count > first!.count {
+                second = first
+                first = (item.id, count)
+            } else if second == nil || count > second!.count {
+                second = (item.id, count)
+            }
         }
-        return Set(ranked.prefix(2).map { $0.element.id })
+        return Set([first?.id, second?.id].compactMap { $0 })
     }
 
     func clearRecentPictureWords() {
@@ -704,7 +1409,8 @@ final class CommunicationStore: ObservableObject {
     }
 
     private func recordRecentPictureWord(_ id: UUID) {
-        guard settings.recentPictureWordsEnabled || settings.highlightRecentPictureWords
+        guard !isPrivateConversationActive,
+              settings.recentPictureWordsEnabled || settings.highlightRecentPictureWords
                 || settings.highlightWordsForTimeOfDay,
               items.contains(where: { $0.id == id }) else { return }
         var updated = settings
@@ -726,6 +1432,7 @@ final class CommunicationStore: ObservableObject {
         messagePartLanguages.append(PhraseLanguage.normalized(languageCode) ?? settings.communicationLanguage)
         messagePartBases.append(clean)
         messagePartItemIDs.append(nil)
+        messagePartPictureOverrides.append(nil)
         updateActiveConversation(immediately: true)
     }
 
@@ -758,6 +1465,7 @@ final class CommunicationStore: ObservableObject {
             messagePartLanguages.removeLast()
             messagePartBases.removeLast()
             messagePartItemIDs.removeLast()
+            messagePartPictureOverrides.removeLast()
             updateActiveConversation(immediately: true)
         }
     }
@@ -765,22 +1473,29 @@ final class CommunicationStore: ObservableObject {
     func clearMessage() {
         guard !messageParts.isEmpty else { return }
         cancelPendingAutoClear()
-        if let index = conversations.firstIndex(where: { $0.id == activeConversationID }) {
+        if isPrivateConversationActive {
+            privateConversation?.clearedPictureMessage = ClearedPictureMessage(
+                parts: messageParts, languages: messagePartLanguages, bases: messagePartBases,
+                itemIDs: messagePartItemIDs, pictureOverrides: messagePartPictureOverrides)
+        } else if let index = conversations.firstIndex(where: { $0.id == activeConversationID }) {
             conversations[index].clearedPictureMessage = ClearedPictureMessage(
                 parts: messageParts, languages: messagePartLanguages, bases: messagePartBases,
-                itemIDs: messagePartItemIDs)
+                itemIDs: messagePartItemIDs, pictureOverrides: messagePartPictureOverrides)
         }
         messageParts.removeAll()
         messagePartLanguages.removeAll()
         messagePartBases.removeAll()
         messagePartItemIDs.removeAll()
+        messagePartPictureOverrides.removeAll()
         updateActiveConversation(immediately: true)
     }
 
     func undoClearMessage() {
-        guard messageParts.isEmpty,
-              let index = conversations.firstIndex(where: { $0.id == activeConversationID }),
-              let cleared = conversations[index].clearedPictureMessage else { return }
+        guard messageParts.isEmpty else { return }
+        let index = conversations.firstIndex(where: { $0.id == activeConversationID })
+        let cleared = isPrivateConversationActive ? privateConversation?.clearedPictureMessage
+            : index.flatMap({ conversations[$0].clearedPictureMessage })
+        guard let cleared else { return }
         messageParts = cleared.parts
         messagePartLanguages = cleared.languages.count == cleared.parts.count
             ? cleared.languages : Array(repeating: settings.communicationLanguage, count: cleared.parts.count)
@@ -788,12 +1503,28 @@ final class CommunicationStore: ObservableObject {
         let clearedIDs = cleared.itemIDs ?? []
         messagePartItemIDs = clearedIDs.count == cleared.parts.count
             ? clearedIDs : Array(repeating: nil, count: cleared.parts.count)
-        conversations[index].clearedPictureMessage = nil
+        let clearedPictures = cleared.pictureOverrides ?? []
+        messagePartPictureOverrides = clearedPictures.count == cleared.parts.count
+            ? clearedPictures : Array(repeating: nil, count: cleared.parts.count)
+        if isPrivateConversationActive { privateConversation?.clearedPictureMessage = nil }
+        else if let index { conversations[index].clearedPictureMessage = nil }
         cancelPendingAutoClear()
         updateActiveConversation(immediately: true)
     }
 
     private func clearSpokenMessageBeforeSelection() {
+        if isPrivateConversationActive {
+            privateConversation?.clearedPictureMessage = nil
+            guard privateConversation?.clearOnNextSelection == true else { return }
+            privateConversation?.clearOnNextSelection = false
+            guard settings.autoClearAfterSpeaking else { return }
+            messageParts.removeAll()
+            messagePartLanguages.removeAll()
+            messagePartBases.removeAll()
+            messagePartItemIDs.removeAll()
+            messagePartPictureOverrides.removeAll()
+            return
+        }
         if let index = conversations.firstIndex(where: { $0.id == activeConversationID }) {
             conversations[index].clearedPictureMessage = nil
         }
@@ -805,9 +1536,14 @@ final class CommunicationStore: ObservableObject {
         messagePartLanguages.removeAll()
         messagePartBases.removeAll()
         messagePartItemIDs.removeAll()
+        messagePartPictureOverrides.removeAll()
     }
 
     private func cancelPendingAutoClear() {
+        if isPrivateConversationActive {
+            privateConversation?.clearOnNextSelection = false
+            return
+        }
         guard let index = conversations.firstIndex(where: { $0.id == activeConversationID }) else { return }
         conversations[index].clearOnNextSelection = false
     }
@@ -882,8 +1618,33 @@ final class CommunicationStore: ObservableObject {
     }
 
     func messageSpeechSegments() -> [MessageSpeechSegment] {
-        MessageSpeechPlanner.segments(parts: messageParts, languages: messagePartLanguages,
-                                      fallbackLanguage: settings.communicationLanguage)
+        guard !settings.boardFolderVoiceIdentifiers.isEmpty else {
+            return MessageSpeechPlanner.segments(parts: messageParts, languages: messagePartLanguages,
+                                                 fallbackLanguage: settings.communicationLanguage)
+        }
+        let voicesByItemID = cachedBoardVoicesByItemID()
+        let voiceIdentifiers = messageParts.indices.map { index in
+            guard messagePartItemIDs.indices.contains(index),
+                  let itemID = messagePartItemIDs[index] else { return "" }
+            return voicesByItemID[itemID] ?? ""
+        }
+        return MessageSpeechPlanner.segments(parts: messageParts, languages: messagePartLanguages,
+                                             fallbackLanguage: settings.communicationLanguage,
+                                             voiceIdentifiers: voiceIdentifiers)
+    }
+
+    private func cachedBoardVoicesByItemID() -> [UUID: String] {
+        let key = BoardVoiceCacheKey(profileID: activeProfileID, itemsRevision: itemsRevision,
+                                     assignments: settings.boardFolderAssignments,
+                                     identifiers: settings.boardFolderVoiceIdentifiers)
+        if boardVoiceCacheKey != key {
+            boardVoiceCacheKey = key
+            boardVoiceByItemID = items.reduce(into: [UUID: String]()) { result, item in
+                let identifier = boardFolderVoiceIdentifier(for: item)
+                if !identifier.isEmpty { result[item.id] = identifier }
+            }
+        }
+        return boardVoiceByItemID
     }
 
     func setNearbyChatSavingEnabled(_ enabled: Bool, including messages: [NearbyChatMessage] = []) {
@@ -898,7 +1659,8 @@ final class CommunicationStore: ObservableObject {
     }
 
     func appendNearbyMessage(_ message: NearbyChatMessage) {
-        guard nearbyChatSavingEnabled, !nearbyMessages.contains(where: { $0.id == message.id }) else { return }
+        guard !isPrivateConversationActive, nearbyChatSavingEnabled,
+              !nearbyMessages.contains(where: { $0.id == message.id }) else { return }
         nearbyMessages.append(message)
         if nearbyMessages.count > 200 { nearbyMessages.removeFirst(nearbyMessages.count - 200) }
         save()
@@ -915,9 +1677,25 @@ final class CommunicationStore: ObservableObject {
         let segments = isPictureMessage
             ? messageSpeechSegments()
             : [MessageSpeechSegment(text: message, language: settings.communicationLanguage)]
-        let utterances = segments.map { makeUtterance($0.text, language: $0.language) }
+        let recording = bankedRecording(matching: message)
+        if recording == nil { await warmExportVoices(for: segments) }
+        let utterances = segments.map {
+            makeUtterance($0.text, language: $0.language, voiceIdentifier: $0.voiceIdentifier)
+        }
         return try await SpokenAudioExporter.export(
-            utterances: utterances, recordingData: bankedRecording(matching: message))
+            utterances: utterances, recordingData: recording)
+    }
+
+    private func warmExportVoices(for segments: [MessageSpeechSegment]) async {
+        let identifiers = Set(segments.map {
+            $0.voiceIdentifier.isEmpty ? settings.voiceIdentifier : $0.voiceIdentifier
+        }.filter { !$0.isEmpty })
+        guard !identifiers.isEmpty else { return }
+        for identifier in identifiers { _ = SpeechVoiceResolver.shared.identifier(identifier) }
+        for _ in 0..<15 {
+            if identifiers.allSatisfy({ SpeechVoiceResolver.shared.identifier($0) != nil }) { return }
+            try? await Task.sleep(for: .milliseconds(100))
+        }
     }
 
     func exportPhraseAudio(_ phrase: SavedPhrase) async throws -> URL {
@@ -937,52 +1715,68 @@ final class CommunicationStore: ObservableObject {
     func speakMessage() {
         let segments = messageSpeechSegments()
         guard !segments.isEmpty else { return }
-        if let index = conversations.firstIndex(where: { $0.id == activeConversationID }) {
+        if isPrivateConversationActive {
+            privateConversation?.clearOnNextSelection = settings.autoClearAfterSpeaking
+        } else if let index = conversations.firstIndex(where: { $0.id == activeConversationID }) {
             conversations[index].clearOnNextSelection = settings.autoClearAfterSpeaking
             save()
         }
         if let recording = bankedRecording(matching: composedMessage) {
             playRecorded(recording, messageSource: .picture)
-            saveSpokenMessage(composedMessage)
+            saveSpokenMessage(composedMessage, inputMode: .picture)
             return
         }
-        let utterances = segments.map { makeUtterance($0.text, language: $0.language) }
+        let utterances = segments.map {
+            makeUtterance($0.text, language: $0.language, voiceIdentifier: $0.voiceIdentifier)
+        }
         beginSpeechPlayback()
         beginSpeechHighlight(utterances, source: .picture)
         pendingMessageUtterances = Set(utterances.map(ObjectIdentifier.init))
         pendingMessageSource = .picture
-        for utterance in utterances { speaker.speak(utterance) }
-        saveSpokenMessage(composedMessage)
+        let voice = speechSynthesizer
+        for (index, utterance) in utterances.enumerated() {
+            queueSpeech(utterance, with: voice, language: segments[index].language,
+                        voiceIdentifier: segments[index].voiceIdentifier)
+        }
+        saveSpokenMessage(composedMessage, inputMode: .picture)
     }
 
     func speak(_ text: String, saveToHistory: Bool = false,
-               followAlong: SpeechHighlightSource? = nil, languageCode: String? = nil) {
+               followAlong: SpeechHighlightSource? = nil, languageCode: String? = nil,
+               inputMode: SpokenMessageInputMode? = nil, voiceIdentifier: String? = nil) {
         let message = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !message.isEmpty else { return }
+        let historyMode = inputMode ?? (followAlong == .typed ? .typed :
+                                        followAlong == .picture ? .picture : .other)
         if saveToHistory, let recording = bankedRecording(matching: message) {
             playRecorded(recording, messageSource: followAlong)
-            saveSpokenMessage(message)
+            saveSpokenMessage(message, inputMode: historyMode)
             return
         }
         beginSpeechPlayback()
-        let utterance = makeUtterance(message, language: languageCode ?? settings.communicationLanguage)
+        let utterance = makeUtterance(message, language: languageCode ?? settings.communicationLanguage,
+                                     voiceIdentifier: voiceIdentifier)
         if let followAlong {
             beginSpeechHighlight([utterance], source: followAlong)
             pendingMessageUtterances = [ObjectIdentifier(utterance)]
             pendingMessageSource = followAlong
         }
-        speaker.speak(utterance)
-        if saveToHistory { saveSpokenMessage(message) }
+        queueSpeech(utterance, with: speechSynthesizer,
+                    language: languageCode ?? settings.communicationLanguage,
+                    voiceIdentifier: voiceIdentifier)
+        if saveToHistory { saveSpokenMessage(message, inputMode: historyMode) }
     }
 
-    func speakStandaloneMessage(_ text: String, audioData: Data? = nil) {
+    func speakStandaloneMessage(_ text: String, audioData: Data? = nil,
+                                voiceIdentifier: String? = nil) {
         let message = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !message.isEmpty else { return }
         if let audioData, (try? AVAudioPlayer(data: audioData)) != nil {
             playRecorded(audioData)
-            saveSpokenMessage(message)
+            saveSpokenMessage(message, inputMode: .quickMessage)
         } else {
-            speak(message, saveToHistory: true)
+            speak(message, saveToHistory: true, inputMode: .quickMessage,
+                  voiceIdentifier: voiceIdentifier)
         }
     }
 
@@ -993,16 +1787,49 @@ final class CommunicationStore: ObservableObject {
             beginSpeechPlayback()
             typingPreviewActive = true
         }
+        let voice = speechSynthesizer
         for preview in previews {
-            speaker.speak(makeUtterance(preview, language: settings.communicationLanguage))
+            queueSpeech(makeUtterance(preview, language: settings.communicationLanguage),
+                        with: voice, language: settings.communicationLanguage)
         }
     }
 
-    func speak(_ text: String, language: String) {
+    func speak(_ text: String, language: String, voiceIdentifier: String? = nil) {
         let message = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !message.isEmpty else { return }
         beginSpeechPlayback()
-        speaker.speak(makeUtterance(message, language: language == "es" ? "es" : "en"))
+        let code = language == "es" ? "es" : "en"
+        queueSpeech(makeUtterance(message, language: code, voiceIdentifier: voiceIdentifier),
+                    with: speechSynthesizer, language: code, voiceIdentifier: voiceIdentifier)
+    }
+
+    private func queueSpeech(_ utterance: AVSpeechUtterance, with synthesizer: AVSpeechSynthesizer,
+                             language: String, voiceIdentifier: String? = nil) {
+        activeSpeechUtterances.insert(ObjectIdentifier(utterance))
+        let voiceLanguage = language == "es" ? "es-ES" : (language == "en" ? "en-US" : language)
+        SpeechCommandQueue.shared.speak(utterance, with: synthesizer,
+                                        language: voiceLanguage,
+                                        preferredVoiceIdentifier: (voiceIdentifier?.isEmpty == false
+                                            ? voiceIdentifier : nil) ?? settings.voiceIdentifier)
+    }
+
+    func speechUtteranceDidEnd(_ identifier: ObjectIdentifier) {
+        activeSpeechUtterances.remove(identifier)
+    }
+
+    private var speechSynthesizer: AVSpeechSynthesizer {
+        if let speaker { return speaker }
+        let newSpeaker = AVSpeechSynthesizer()
+        newSpeaker.delegate = speechHighlightDelegate
+        speaker = newSpeaker
+        return newSpeaker
+    }
+
+    private var cueSynthesizer: AVSpeechSynthesizer {
+        if let scanCueSpeaker { return scanCueSpeaker }
+        let newSpeaker = AVSpeechSynthesizer()
+        scanCueSpeaker = newSpeaker
+        return newSpeaker
     }
 
     private func beginSpeechPlayback() {
@@ -1012,7 +1839,8 @@ final class CommunicationStore: ObservableObject {
         pendingMessageSource = nil
         messagePlaybackState = nil
         messagePlaybackUsesRecording = false
-        speaker.stopSpeaking(at: .immediate)
+        if let speaker { SpeechCommandQueue.shared.stop(speaker) }
+        activeSpeechUtterances.removeAll()
         stopScanCue()
         typingPreviewActive = false
         playbackRequestID = UUID()
@@ -1088,18 +1916,25 @@ final class CommunicationStore: ObservableObject {
         speechHighlight = nil
     }
 
-    func makeUtterance(_ text: String, language: String) -> AVSpeechUtterance {
+    func makeUtterance(_ text: String, language: String,
+                       voiceIdentifier: String? = nil) -> AVSpeechUtterance {
         let spokenText = PronunciationDictionary.applying(
             text, language: language, rules: settings.pronunciationRules)
         let utterance = AVSpeechUtterance(string: spokenText)
         utterance.rate = settings.speechRate
+        utterance.pitchMultiplier = settings.speechPitch
         utterance.volume = settings.speechPlaybackVolume
-        let selectedVoice = AVSpeechSynthesisVoice(identifier: settings.voiceIdentifier)
+        let preferredVoiceIdentifier = (voiceIdentifier?.isEmpty == false
+                                        ? voiceIdentifier : nil) ?? settings.voiceIdentifier
+        let selectedVoice = preferredVoiceIdentifier.isEmpty
+            ? nil
+            : SpeechVoiceResolver.shared.identifier(preferredVoiceIdentifier)
         let requestedLanguage = language == "es" ? "es-ES" : (language == "en" ? "en-US" : language)
-        utterance.voice = selectedVoice?.language.hasPrefix(language) == true
-            ? selectedVoice
-            : (AVSpeechSynthesisVoice(language: requestedLanguage)
-               ?? AVSpeechSynthesisVoice(language: settings.communicationLanguage == "es" ? "es-ES" : "en-US"))
+        if selectedVoice?.language.hasPrefix(language) == true {
+            utterance.voice = selectedVoice
+        } else if preferredVoiceIdentifier.isEmpty || selectedVoice != nil {
+            utterance.voice = SpeechVoiceResolver.shared.language(requestedLanguage)
+        }
         return utterance
     }
 
@@ -1119,10 +1954,11 @@ final class CommunicationStore: ObservableObject {
         settings.pronunciationRules.removeAll { $0.id == rule.id }
     }
 
-    private func saveSpokenMessage(_ message: String) {
+    private func saveSpokenMessage(_ message: String, inputMode: SpokenMessageInputMode) {
+        guard !isPrivateConversationActive else { return }
         var changed = false
         if settings.saveHistory && !settings.historyPaused {
-            history.insert(.init(text: message), at: 0)
+            history.insert(.init(text: message, speaker: .communicator, inputMode: inputMode), at: 0)
             if history.count > 50 { history.removeLast(history.count - 50) }
             changed = true
         }
@@ -1133,8 +1969,36 @@ final class CommunicationStore: ObservableObject {
         if changed { save() }
     }
 
+    private func recordPictureUse(_ item: CommunicationItem) {
+        guard settings.recordCommunicationUse, !isPrivateConversationActive else { return }
+        recordCommunicationUse(kind: .pictureButton, label: displayLabel(for: item),
+                               board: item.category, itemID: item.id)
+    }
+
+    private func recordCommunicationUse(kind: CommunicationUsageEvent.Kind, label: String,
+                                        board: String? = nil, itemID: UUID? = nil) {
+        guard settings.recordCommunicationUse, !isPrivateConversationActive else { return }
+        let event = CommunicationUsageEvent(kind: kind, label: label, board: board, itemID: itemID)
+        guard !event.label.isEmpty else { return }
+        usageEvents.insert(event, at: 0)
+        if usageEvents.count > CommunicationUsageEvent.maximumCount {
+            usageEvents.removeLast(usageEvents.count - CommunicationUsageEvent.maximumCount)
+        }
+        save()
+    }
+
+    func clearCommunicationUse() {
+        guard !usageEvents.isEmpty else { return }
+        usageEvents = []
+        save()
+    }
+
     func stopSpeaking() {
         beginSpeechPlayback()
+    }
+
+    var isSpeechOutputActive: Bool {
+        !activeSpeechUtterances.isEmpty || audioPlayer?.isPlaying == true
     }
 
     @discardableResult
@@ -1144,8 +2008,8 @@ final class CommunicationStore: ObservableObject {
             guard let audioPlayer, audioPlayer.isPlaying else { return false }
             audioPlayer.pause()
         } else {
-            guard speaker.isSpeaking, !speaker.isPaused,
-                  speaker.pauseSpeaking(at: .immediate) else { return false }
+            guard let speaker, !activeSpeechUtterances.isEmpty else { return false }
+            SpeechCommandQueue.shared.pause(speaker)
         }
         messagePlaybackState = .paused(source)
         return true
@@ -1157,7 +2021,8 @@ final class CommunicationStore: ObservableObject {
         if messagePlaybackUsesRecording {
             guard let audioPlayer, audioPlayer.play() else { return false }
         } else {
-            guard speaker.isPaused, speaker.continueSpeaking() else { return false }
+            guard let speaker, !activeSpeechUtterances.isEmpty else { return false }
+            SpeechCommandQueue.shared.resume(speaker)
         }
         messagePlaybackState = .playing(source)
         return true
@@ -1165,7 +2030,7 @@ final class CommunicationStore: ObservableObject {
 
     func stopScanCue() {
         scanCueRequestID = UUID()
-        scanCueSpeaker.stopSpeaking(at: .immediate)
+        if let scanCueSpeaker { SpeechCommandQueue.shared.stop(scanCueSpeaker) }
         scanCuePlayer?.stop()
     }
 
@@ -1174,7 +2039,7 @@ final class CommunicationStore: ObservableObject {
         let mode = settings.scanCueMode
         guard settings.scanEnabled, mode != .off,
               !settings.speechMuted,
-              !speaker.isSpeaking, audioPlayer?.isPlaying != true else { return }
+              activeSpeechUtterances.isEmpty, audioPlayer?.isPlaying != true else { return }
         if mode == .blip || mode == .woodblock {
             playScanCueSound(mode)
             return
@@ -1186,11 +2051,13 @@ final class CommunicationStore: ObservableObject {
         utterance.rate = min(0.62, max(0.52, settings.speechRate + 0.06))
         utterance.pitchMultiplier = 1.15
         utterance.volume = settings.speechPlaybackVolume * 0.75
-        let selectedVoice = AVSpeechSynthesisVoice(identifier: settings.scanCueVoiceIdentifier)
+        let selectedVoice = SpeechVoiceResolver.shared.identifier(settings.scanCueVoiceIdentifier)
         utterance.voice = selectedVoice?.language.hasPrefix(cue.language) == true
             ? selectedVoice
-            : AVSpeechSynthesisVoice(language: cue.language == "es" ? "es-ES" : "en-US")
-        scanCueSpeaker.speak(utterance)
+            : SpeechVoiceResolver.shared.language(cue.language == "es" ? "es-ES" : "en-US")
+        SpeechCommandQueue.shared.speak(utterance, with: cueSynthesizer,
+                                        language: cue.language == "es" ? "es-ES" : "en-US",
+                                        preferredVoiceIdentifier: settings.scanCueVoiceIdentifier)
     }
 
     private func playScanCueSound(_ mode: ScanCueMode) {
@@ -1200,7 +2067,7 @@ final class CommunicationStore: ObservableObject {
             guard (try? await AudioSessionManager.shared.activatePlayback()) != nil,
                   scanCueRequestID == requestID,
                   settings.scanEnabled, settings.scanCueMode == mode,
-                  !speaker.isSpeaking, audioPlayer?.isPlaying != true else { return }
+                  activeSpeechUtterances.isEmpty, audioPlayer?.isPlaying != true else { return }
             scanCuePlayer = try? AVAudioPlayer(data: data)
             scanCuePlayer?.volume = settings.speechPlaybackVolume
             scanCuePlayer?.prepareToPlay()
@@ -1267,7 +2134,8 @@ final class CommunicationStore: ObservableObject {
                  spanishLabel: String = "", spanishMessage: String = "",
                  phraseOptions: [CardPhrase] = [], visibility: ButtonVisibility = .shown,
                  backgroundColorHex: String? = nil, borderColorHex: String? = nil,
-                 grammarCategory: GrammarCategory? = nil) {
+                 grammarCategory: GrammarCategory? = nil,
+                 labelFontSize: Int? = nil, contentPadding: Int? = nil) {
         let cleanLabel = label.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !cleanLabel.isEmpty else { return }
         let board = categories.contains(category) ? category : "Core"
@@ -1300,7 +2168,9 @@ final class CommunicationStore: ObservableObject {
                                          ? action : nil,
                                      backgroundColorHex: backgroundColorHex.flatMap { ButtonColorValue(text: $0)?.hex },
                                      borderColorHex: borderColorHex.flatMap { ButtonColorValue(text: $0)?.hex },
-                                     grammarCategory: grammarCategory)
+                                     grammarCategory: grammarCategory,
+                                     labelFontSize: CommunicationItem.normalizedLabelFontSize(labelFontSize),
+                                     contentPadding: CommunicationItem.normalizedContentPadding(contentPadding))
         items.append(item)
         setSpanishTranslation(for: item.id, label: spanishLabel, message: spanishMessage, saveAfter: false)
         save()
@@ -1670,6 +2540,20 @@ final class CommunicationStore: ObservableObject {
         return folder
     }
 
+    func boardFolderVoiceIdentifier(for item: CommunicationItem) -> String {
+        guard let folder = settings.boardFolderAssignments[item.category] else { return "" }
+        return settings.boardFolderVoiceIdentifiers[folder] ?? ""
+    }
+
+    @discardableResult
+    func setBoardFolderVoiceIdentifier(_ identifier: String?, for folder: String) -> Bool {
+        guard settings.boardFolders.contains(folder) else { return false }
+        let clean = identifier?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard clean.count <= 256 else { return false }
+        settings.boardFolderVoiceIdentifiers[folder] = clean.isEmpty ? nil : clean
+        return true
+    }
+
     func visibleBoards(in folder: String) -> [String] {
         visibleBoards.filter { boardFolder(for: $0) == folder }
     }
@@ -1709,6 +2593,9 @@ final class CommunicationStore: ObservableObject {
         settings.boardFolderAssignments = settings.boardFolderAssignments.mapValues {
             $0 == name ? clean : $0
         }
+        if let voice = settings.boardFolderVoiceIdentifiers.removeValue(forKey: name) {
+            settings.boardFolderVoiceIdentifiers[clean] = voice
+        }
         return true
     }
 
@@ -1717,6 +2604,7 @@ final class CommunicationStore: ObservableObject {
         guard settings.boardFolders.contains(name) else { return false }
         settings.boardFolders.removeAll { $0 == name }
         settings.boardFolderAssignments = settings.boardFolderAssignments.filter { $0.value != name }
+        settings.boardFolderVoiceIdentifiers[name] = nil
         return true
     }
 
@@ -1822,6 +2710,8 @@ final class CommunicationStore: ObservableObject {
         cleaned.backgroundColorHex = updated.backgroundColorHex.flatMap { ButtonColorValue(text: $0)?.hex }
         if cleaned.imageData == nil { cleaned.arasaacPictogramID = nil }
         cleaned.borderColorHex = updated.borderColorHex.flatMap { ButtonColorValue(text: $0)?.hex }
+        cleaned.labelFontSize = CommunicationItem.normalizedLabelFontSize(updated.labelFontSize)
+        cleaned.contentPadding = CommunicationItem.normalizedContentPadding(updated.contentPadding)
         cleaned.phraseOptions = cleaned.destinationBoard == nil && cleaned.effectiveAction.allowsPhraseOptions
             ? CardPhrase.cleaned(updated.phraseOptions ?? []) : nil
         if !cleaned.effectiveAction.allowsRecording { cleaned.audioData = nil }
@@ -1833,6 +2723,40 @@ final class CommunicationStore: ObservableObject {
         }
         items[index] = cleaned
         save()
+    }
+
+    @discardableResult
+    func copyItem(_ id: UUID, to board: String) -> UUID? {
+        guard !isBoardOnlyModeActive, categories.contains(board),
+              let source = items.first(where: { $0.id == id }),
+              canTransferItem(source, to: board) else { return nil }
+        var copy = source
+        copy.id = UUID()
+        copy.category = board
+        copy.isCustom = true
+        copy.isFavorite = false
+        items.append(copy)
+        wordTranslations[copy.id.uuidString] = wordTranslations[source.id.uuidString]
+        save()
+        return copy.id
+    }
+
+    @discardableResult
+    func moveItem(_ id: UUID, to board: String) -> Bool {
+        guard !isBoardOnlyModeActive, categories.contains(board),
+              let index = items.firstIndex(where: { $0.id == id }),
+              items[index].category != board,
+              canTransferItem(items[index], to: board) else { return false }
+        var moved = items.remove(at: index)
+        moved.category = board
+        items.append(moved)
+        save()
+        return true
+    }
+
+    private func canTransferItem(_ item: CommunicationItem, to board: String) -> Bool {
+        guard let destination = item.destinationBoard else { return true }
+        return validDestination(destination, from: board) == destination
     }
 
     @discardableResult
@@ -2270,11 +3194,14 @@ final class CommunicationStore: ObservableObject {
         guard PhraseTemplate.fields(in: current.text).isEmpty else { return }
         saveTransactionDepth += 1
         defer { finishSaveTransaction() }
+        recordCommunicationUse(kind: .savedPhrase, label: current.displayLabel,
+                               board: current.folder, itemID: current.id)
         if let audioData = current.audioData, (try? AVAudioPlayer(data: audioData)) != nil {
             playRecorded(audioData)
-            saveSpokenMessage(current.text)
+            saveSpokenMessage(current.text, inputMode: .savedPhrase)
         } else {
-            speak(current.text, saveToHistory: true, languageCode: current.languageCode)
+            speak(current.text, saveToHistory: true, languageCode: current.languageCode,
+                  inputMode: .savedPhrase)
         }
         recordRecentPhrase(current)
     }
@@ -2286,7 +3213,7 @@ final class CommunicationStore: ObservableObject {
     }
 
     func recordRecentPhrase(_ phrase: SavedPhrase) {
-        guard settings.recentPhrasesEnabled,
+        guard !isPrivateConversationActive, settings.recentPhrasesEnabled,
               phrases.contains(where: { $0.id == phrase.id }) else { return }
         var ids = settings.recentPhraseIDs.filter { $0 != phrase.id }
         ids.insert(phrase.id, at: 0)
@@ -2505,6 +3432,17 @@ final class CommunicationStore: ObservableObject {
     func deleteHistoryEntry(_ entry: SpokenMessage) {
         history.removeAll { $0.id == entry.id }
         save()
+    }
+
+    @discardableResult
+    func addPartnerTurn(_ text: String) -> Bool {
+        let clean = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard settings.saveHistory, !settings.historyPaused, !isPrivateConversationActive,
+              !isBoardOnlyModeActive, !clean.isEmpty, clean.count <= 1_000 else { return false }
+        history.insert(.init(text: clean, speaker: .partner, inputMode: .manualNote), at: 0)
+        if history.count > 50 { history.removeLast(history.count - 50) }
+        save()
+        return true
     }
 
     func clearHistory() {
@@ -2751,6 +3689,8 @@ final class CommunicationStore: ObservableObject {
         for index in routineTemplates.indices where routineTemplates[index].rewardChartID == id {
             routineTemplates[index].rewardChartID = nil
         }
+        weeklyPlan.removeMissingRewardCharts(validIDs: Set(rewardCharts.map(\.id)))
+        visualCalendar.removeMissingRewardCharts(validIDs: Set(rewardCharts.map(\.id)))
         save()
         return true
     }
@@ -2953,7 +3893,7 @@ final class CommunicationStore: ObservableObject {
             var plans = ReminderRestorePlans()
             for profile in otherProfiles {
                 guard let data = try? Data(contentsOf: profile.url),
-                      let stored = try? JSONDecoder().decode(StoredData.self, from: data) else { continue }
+                      let stored = try? JSONDecoder().decode(ReminderProfileSnapshot.self, from: data) else { continue }
                 plans.append(Self.reminderPlans(profileID: profile.id,
                                                 profileName: profile.name,
                                                 templates: stored.routineTemplates,
@@ -3018,6 +3958,14 @@ final class CommunicationStore: ObservableObject {
     }
 
     @discardableResult
+    func setRoutineTemplateRewardFrequency(id: UUID, frequency: RoutineRewardFrequency) -> Bool {
+        guard let index = routineTemplates.firstIndex(where: { $0.id == id }) else { return false }
+        routineTemplates[index].rewardFrequency = frequency
+        save()
+        return true
+    }
+
+    @discardableResult
     func awardRoutineCompletion(templateID: UUID) -> RewardChart? {
         guard let chartID = routineTemplates.first(where: { $0.id == templateID })?.rewardChartID,
               let index = rewardCharts.firstIndex(where: { $0.id == chartID }),
@@ -3042,14 +3990,23 @@ final class CommunicationStore: ObservableObject {
 
     @discardableResult
     func addWeeklyActivity(_ activity: WeeklyActivity, on weekday: Int) -> Bool {
-        guard !calendarEditingBlocked, weeklyPlan.add(activity, on: weekday) else { return false }
+        guard !calendarEditingBlocked,
+              activity.rewardChartID.map({ id in rewardCharts.contains(where: { $0.id == id }) }) ?? true,
+              weeklyPlan.add(activity, on: weekday) else { return false }
         save()
         return true
     }
 
     @discardableResult
     func updateWeeklyActivity(_ activity: WeeklyActivity, on weekday: Int) -> Bool {
-        guard !calendarEditingBlocked, weeklyPlan.update(activity, on: weekday) else { return false }
+        var updated = activity
+        if let previous = weeklyPlan.activities(on: weekday).first(where: { $0.id == activity.id }) {
+            updated.rewardedDates = previous.rewardChartID == activity.rewardChartID
+                ? previous.rewardedDates : nil
+        }
+        guard !calendarEditingBlocked,
+              updated.rewardChartID.map({ id in rewardCharts.contains(where: { $0.id == id }) }) ?? true,
+              weeklyPlan.update(updated, on: weekday) else { return false }
         save()
         if weeklyPlan.reminders.contains(where: { $0.weekday == weekday && $0.activityID == activity.id }) {
             Task { await restoreWeeklyReminders() }
@@ -3095,7 +4052,18 @@ final class CommunicationStore: ObservableObject {
     }
 
     func toggleWeeklyActivity(id: UUID, on weekday: Int, date: Date) {
+        let before = weeklyPlan.activities(on: weekday).first(where: { $0.id == id })
+        let wasComplete = before?.isComplete(on: date) == true
         weeklyPlan.toggle(id: id, on: weekday, date: date)
+        if !wasComplete,
+           let activity = weeklyPlan.activities(on: weekday).first(where: { $0.id == id }),
+           activity.isComplete(on: date), !activity.hasEarnedReward(on: date),
+           let chartID = activity.rewardChartID,
+           let chartIndex = rewardCharts.firstIndex(where: { $0.id == chartID }),
+           rewardCharts[chartIndex].earnedTokens < rewardCharts[chartIndex].targetTokens,
+           weeklyPlan.markRewarded(id: id, on: weekday, date: date) {
+            _ = rewardCharts[chartIndex].setEarnedTokens(rewardCharts[chartIndex].earnedTokens + 1)
+        }
         save()
     }
 
@@ -3175,7 +4143,13 @@ final class CommunicationStore: ObservableObject {
 
     @discardableResult
     func addCalendarEvent(_ event: CalendarEvent) -> Bool {
-        guard !calendarEditingBlocked, visualCalendar.add(event) else { return false }
+        guard !calendarEditingBlocked else { return false }
+        var updated = event
+        if let id = updated.rewardChartID, !rewardCharts.contains(where: { $0.id == id }) {
+            updated.rewardChartID = nil
+            updated.rewardedDates = nil
+        }
+        guard visualCalendar.add(updated) else { return false }
         save()
         return true
     }
@@ -3190,11 +4164,17 @@ final class CommunicationStore: ObservableObject {
     func updateCalendarEvent(_ event: CalendarEvent) -> Bool {
         guard !calendarEditingBlocked else { return false }
         let previous = visualCalendar.events.first { $0.id == event.id }
-        guard visualCalendar.update(event) else { return false }
+        var updated = event
+        if let id = updated.rewardChartID, !rewardCharts.contains(where: { $0.id == id }) {
+            updated.rewardChartID = nil
+        }
+        updated.rewardedDates = updated.rewardChartID == previous?.rewardChartID
+            ? previous?.rewardedDates : nil
+        guard visualCalendar.update(updated) else { return false }
         save()
-        if let previous, previous.reminder != nil && event.reminder == nil {
+        if let previous, previous.reminder != nil && updated.reminder == nil {
             CalendarReminderManager.cancel(previous, profileID: activeProfileID)
-        } else if previous?.reminder != nil || event.reminder != nil {
+        } else if previous?.reminder != nil || updated.reminder != nil {
             Task { await restoreCalendarReminders() }
         }
         return true
@@ -3241,17 +4221,32 @@ final class CommunicationStore: ObservableObject {
     }
 
     func toggleCalendarEvent(id: UUID, on date: Date) {
+        guard let event = visualCalendar.events.first(where: { $0.id == id }),
+              event.occurs(on: date) else { return }
+        let wasComplete = event.isComplete(on: date)
         visualCalendar.toggleComplete(id: id, on: date)
+        if !wasComplete, let chartID = event.rewardChartID,
+           !event.hasEarnedReward(on: date),
+           let chartIndex = rewardCharts.firstIndex(where: { $0.id == chartID }),
+           rewardCharts[chartIndex].earnedTokens < rewardCharts[chartIndex].targetTokens {
+            rewardCharts[chartIndex].earnedTokens += 1
+            visualCalendar.markRewarded(id: id, on: date)
+        }
         save()
     }
 
     func backupData() throws -> Data {
+        guard !isSavingPictureLibrary else { throw PictureLibraryError.busy }
+        guard !isSavingLifeNotebook else { throw LifeNotebookError.busy }
         updateActiveConversation(immediately: true)
         return try JSONEncoder().encode(StoredData(items: items, categories: categories, routines: routines,
                                             routineHistory: routineHistory,
                                             routineTemplates: routineTemplates,
                                             routineReminders: routineReminders,
-                                            phrases: phrases, jokes: jokes, history: history, notes: notes,
+                                            phrases: phrases, jokes: jokes, history: history,
+                                            usageEvents: usageEvents, notes: notes,
+                                            lifeNotebookPosts: try LifeNotebookDiskStore.load(
+                                                for: activeProfileID, in: baseURL.deletingLastPathComponent()),
                                             savedReadingDocuments: savedReadingDocuments,
                                             learnedPrediction: learnedPrediction,
                                             feelingsLog: feelingsLog, stories: stories,
@@ -3263,7 +4258,9 @@ final class CommunicationStore: ObservableObject {
                                              conversations: conversations, activeConversationID: activeConversationID,
                                              drawingStrokes: drawingStrokes, speechTopics: speechTopics,
                                              nearbyMessages: nearbyMessages,
-                                             nearbyChatSavingEnabled: nearbyChatSavingEnabled))
+                                             nearbyChatSavingEnabled: nearbyChatSavingEnabled,
+                                             pictureLibrary: try PictureLibraryDiskStore.load(
+                                                for: activeProfileID, in: baseURL.deletingLastPathComponent())))
     }
 
     private var localBackupLibrary: LocalBackupLibrary {
@@ -3282,6 +4279,14 @@ final class CommunicationStore: ObservableObject {
 
     func localBackupData(id: UUID) throws -> Data {
         try localBackupLibrary.load(id: id, profileID: activeProfileID)
+    }
+
+    func localBackupDataAsync(id: UUID) async throws -> Data {
+        let directory = baseURL.deletingLastPathComponent()
+        let profileID = activeProfileID
+        return try await Task.detached(priority: .userInitiated) { @Sendable in
+            try LocalBackupLibrary(baseURL: directory).loadRaw(id: id, profileID: profileID)
+        }.value
     }
 
     func deleteLocalBackup(id: UUID) throws {
@@ -3383,8 +4388,16 @@ final class CommunicationStore: ObservableObject {
     }
 
     func importBackup(_ data: Data) throws {
+        guard !isSavingPictureLibrary else { throw PictureLibraryError.busy }
+        guard !isSavingLifeNotebook else { throw LifeNotebookError.busy }
         let restored = try JSONDecoder().decode(StoredData.self, from: data)
         guard !restored.items.isEmpty else { throw BackupError.emptyVocabulary }
+        try LifeNotebookDiskStore.validate(restored.lifeNotebookPosts)
+        try PictureLibraryDiskStore.save(restored.pictureLibrary, for: activeProfileID,
+                                         in: baseURL.deletingLastPathComponent())
+        try LifeNotebookDiskStore.save(restored.lifeNotebookPosts, for: activeProfileID,
+                                       in: baseURL.deletingLastPathComponent())
+        if isPrivateConversationActive { endPrivateConversation() }
         let availableChoiceBoardIDs = Set(restored.choiceBoards.map(\.id))
         let previousReminders = routineReminders
         let previousWeeklyReminders = weeklyPlan.reminders
@@ -3422,8 +4435,13 @@ final class CommunicationStore: ObservableObject {
         phrases = restored.phrases
         jokes = restored.jokes
         history = restored.history
+        usageEvents = restored.usageEvents
         notes = restored.notes
+        lifeNotebookPosts = restored.lifeNotebookPosts.sorted { $0.occurredAt > $1.occurredAt }
+        loadedLifeNotebookProfileID = activeProfileID
         savedReadingDocuments = restored.savedReadingDocuments
+        pictureLibrary = restored.pictureLibrary
+        loadedPictureLibraryProfileID = activeProfileID
         learnedPrediction = restored.learnedPrediction
         feelingsLog = restored.feelingsLog
         stories = restored.stories
@@ -3432,6 +4450,8 @@ final class CommunicationStore: ObservableObject {
         weeklyPlan = restored.weeklyPlan
         visualCalendar = restored.visualCalendar
         rewardCharts = restored.rewardCharts
+        weeklyPlan.removeMissingRewardCharts(validIDs: Set(rewardCharts.map(\.id)))
+        visualCalendar.removeMissingRewardCharts(validIDs: Set(rewardCharts.map(\.id)))
         rewardCollectibles = restored.rewardCollectibles
         isCalendarEditingUnlocked = false
         if visualCalendar.isEditingLocked && CalendarEditingPINStore.isMissing(for: activeProfileID) {
@@ -3452,6 +4472,7 @@ final class CommunicationStore: ObservableObject {
         messagePartLanguages = Self.languages(for: activeDraft, fallback: restored.settings.communicationLanguage)
         messagePartBases = Self.bases(for: activeDraft)
         messagePartItemIDs = Self.itemIDs(for: activeDraft)
+        messagePartPictureOverrides = Self.pictureOverrides(for: activeDraft)
         typedMessage = activeDraft.typedMessage
         typedCursorOffset = activeDraft.typedCursorOffset
         pendingPhrasePrefix = activeDraft.pendingPhrasePrefix
@@ -3523,6 +4544,10 @@ final class CommunicationStore: ObservableObject {
                     updatedSettings.boardFolders.append(folder)
                 }
                 updatedSettings.boardFolderAssignments[target] = folder
+                if updatedSettings.boardFolderVoiceIdentifiers[folder] == nil {
+                    updatedSettings.boardFolderVoiceIdentifiers[folder] =
+                        restored.settings.boardFolderVoiceIdentifiers[importedFolder]
+                }
             }
         }
         categories = used
@@ -3533,6 +4558,9 @@ final class CommunicationStore: ObservableObject {
     }
 
     private func save() {
+        predictionContentRevision &+= 1
+        draftSaveTask?.cancel()
+        draftSaveTask = nil
         if saveTransactionDepth > 0 {
             saveRequested = true
             return
@@ -3542,7 +4570,7 @@ final class CommunicationStore: ObservableObject {
                               routineReminders: routineReminders,
                               phrases: phrases,
                               jokes: jokes,
-                              history: history, notes: notes,
+                              history: history, usageEvents: usageEvents, notes: notes,
                               savedReadingDocuments: savedReadingDocuments,
                               learnedPrediction: learnedPrediction,
                               feelingsLog: feelingsLog,
@@ -3577,22 +4605,39 @@ final class CommunicationStore: ObservableObject {
     }
 
     private func updateActiveConversation(immediately: Bool) {
+        guard !isPrivateConversationActive else { return }
         guard let index = conversations.firstIndex(where: { $0.id == activeConversationID }) else { return }
+        let draft = conversations[index]
+        let hasChanges = draft.messageParts != messageParts ||
+            draft.messagePartLanguages != messagePartLanguages ||
+            (draft.messagePartBases ?? []) != messagePartBases ||
+            (draft.messagePartItemIDs ?? []) != messagePartItemIDs ||
+            (draft.messagePartPictureOverrides ?? []) != messagePartPictureOverrides ||
+            draft.typedMessage != typedMessage ||
+            draft.typedCursorOffset != typedCursorOffset ||
+            draft.pendingPhrasePrefix != pendingPhrasePrefix
+        guard hasChanges else {
+            if immediately && draftSaveTask != nil { save() }
+            return
+        }
         conversations[index].messageParts = messageParts
         conversations[index].messagePartLanguages = messagePartLanguages
         conversations[index].messagePartBases = messagePartBases
         conversations[index].messagePartItemIDs = messagePartItemIDs
+        conversations[index].messagePartPictureOverrides = messagePartPictureOverrides
         conversations[index].typedMessage = typedMessage
         conversations[index].typedCursorOffset = typedCursorOffset
         conversations[index].pendingPhrasePrefix = pendingPhrasePrefix
         conversations[index].updatedAt = .now
         draftSaveTask?.cancel()
+        draftSaveTask = nil
         if immediately {
             save()
         } else {
             draftSaveTask = Task { [weak self] in
                 try? await Task.sleep(for: .milliseconds(500))
                 guard !Task.isCancelled else { return }
+                self?.draftSaveTask = nil
                 self?.save()
             }
         }
@@ -3619,6 +4664,14 @@ final class CommunicationStore: ObservableObject {
         return ids
     }
 
+    private static func pictureOverrides(for draft: ConversationDraft) -> [MessagePictureOverride?] {
+        guard let pictures = draft.messagePartPictureOverrides,
+              pictures.count == draft.messageParts.count else {
+            return Array(repeating: nil, count: draft.messageParts.count)
+        }
+        return pictures
+    }
+
     private func validDestination(_ destination: String?, from category: String) -> String? {
         guard let destination, destination != category,
               categories.contains(destination) else { return nil }
@@ -3633,7 +4686,9 @@ final class CommunicationStore: ObservableObject {
     private static func readData(from url: URL) -> StoredData {
         ProfilePersistenceWriter.shared.flush()
         if let data = try? Data(contentsOf: url),
-           let stored = try? JSONDecoder().decode(StoredData.self, from: data) { return stored }
+           let stored = try? JSONDecoder().decode(StoredData.self, from: data) {
+            return stored
+        }
         return starterData()
     }
 
@@ -3660,6 +4715,8 @@ final class CommunicationStore: ObservableObject {
             }
             cleaned.backgroundColorHex = item.backgroundColorHex.flatMap { ButtonColorValue(text: $0)?.hex }
             cleaned.borderColorHex = item.borderColorHex.flatMap { ButtonColorValue(text: $0)?.hex }
+            cleaned.labelFontSize = CommunicationItem.normalizedLabelFontSize(item.labelFontSize)
+            cleaned.contentPadding = CommunicationItem.normalizedContentPadding(item.contentPadding)
             return cleaned
         }
     }

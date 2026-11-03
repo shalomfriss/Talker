@@ -1,7 +1,256 @@
 import XCTest
 @testable import OpenVoice
 
+final class SpokenClockTests: XCTestCase {
+    func testCurrentTimeUsesTheChosenSpeechLanguage() throws {
+        let utc = try XCTUnwrap(TimeZone(identifier: "UTC"))
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = utc
+        let instant = try XCTUnwrap(calendar.date(from: DateComponents(year: 2026, month: 11, day: 2,
+                                                                       hour: 15, minute: 45)))
+        XCTAssertTrue(SpokenClock.message(at: instant, language: "en", timeZone: utc)
+            .hasPrefix("The time is 3:45"))
+        XCTAssertTrue(SpokenClock.message(at: instant, language: "es", timeZone: utc)
+            .hasPrefix("La hora es 15:45"))
+        XCTAssertTrue(SpokenClock.date(at: instant, language: "es", timeZone: utc)
+            .contains("noviembre"))
+    }
+
+    @MainActor
+    func testClockButtonSpeaksWithoutChangingDraftsAndSurvivesRelaunch() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let file = directory.appendingPathComponent("clock.json")
+        let store = CommunicationStore(storageURL: file)
+        store.settings.saveHistory = true
+        store.addItem(label: "Clock", symbol: "🕒", message: "Clock", category: "Time",
+                      imageData: nil, action: .speakCurrentTime)
+        let button = try XCTUnwrap(store.items.first { $0.label == "Clock" })
+        store.select(button)
+        XCTAssertTrue(store.speechEnginesInitialized.primary)
+        XCTAssertTrue(store.messageParts.isEmpty)
+        XCTAssertTrue(store.typedMessage.isEmpty)
+        XCTAssertTrue(store.history.isEmpty)
+        store.stopSpeaking()
+
+        let reopened = CommunicationStore(storageURL: file)
+        XCTAssertEqual(reopened.items.first { $0.id == button.id }?.effectiveAction, .speakCurrentTime)
+        XCTAssertTrue(StarterVocabulary.items.contains { $0.category == "Time" &&
+            $0.effectiveAction == .speakCurrentTime })
+    }
+}
+
+final class SavedMessageInsightsTests: XCTestCase {
+    func testSevenCalendarDaysAndRepeatedMessagesUseOnlySavedHistory() throws {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = try XCTUnwrap(TimeZone(identifier: "America/Los_Angeles"))
+        let now = try XCTUnwrap(calendar.date(from: DateComponents(year: 2026, month: 11, day: 2,
+                                                                   hour: 12)))
+        let today = calendar.startOfDay(for: now)
+        let twoDaysAgo = try XCTUnwrap(calendar.date(byAdding: .day, value: -2, to: today))
+        let eightDaysAgo = try XCTUnwrap(calendar.date(byAdding: .day, value: -8, to: today))
+        let tomorrow = try XCTUnwrap(calendar.date(byAdding: .day, value: 1, to: today))
+        let history = [
+            SpokenMessage(text: "Help", date: now),
+            SpokenMessage(text: " help ", date: now.addingTimeInterval(-60)),
+            SpokenMessage(text: "Water", date: twoDaysAgo),
+            SpokenMessage(text: "HELP", date: eightDaysAgo),
+            SpokenMessage(text: "Future", date: tomorrow),
+            SpokenMessage(text: "   ", date: now)
+        ]
+
+        let insights = SavedMessageInsights(history: history, now: now, calendar: calendar)
+        XCTAssertEqual(insights.days.count, 7)
+        XCTAssertEqual(insights.days.map(\.count), [0, 0, 0, 0, 1, 0, 2])
+        XCTAssertEqual(insights.total, 3)
+        XCTAssertEqual(insights.activeDays, 2)
+        XCTAssertEqual(insights.repeatedMessages.count, 1)
+        XCTAssertEqual(insights.repeatedMessages[0].text, "Help")
+        XCTAssertEqual(insights.repeatedMessages[0].count, 3)
+    }
+}
+
+final class ThumbnailImageCacheTests: XCTestCase {
+    @MainActor
+    func testLargePhotoIsDownsampledAndReused() throws {
+        let image = UIGraphicsImageRenderer(size: CGSize(width: 1_200, height: 900)).image { context in
+            UIColor.systemBlue.setFill()
+            context.fill(CGRect(x: 0, y: 0, width: 1_200, height: 900))
+        }
+        let data = try XCTUnwrap(image.pngData())
+        let first = try XCTUnwrap(ThumbnailImageCache.image(for: data))
+        let second = try XCTUnwrap(ThumbnailImageCache.image(for: data))
+        XCTAssertTrue(first === second)
+        XCTAssertLessThanOrEqual(first.cgImage?.width ?? .max, 240)
+        XCTAssertLessThanOrEqual(first.cgImage?.height ?? .max, 240)
+    }
+
+    @MainActor
+    func testBackgroundThumbnailDecodeCanPopulateCache() async throws {
+        let image = UIGraphicsImageRenderer(size: CGSize(width: 1_200, height: 900)).image { context in
+            UIColor.systemGreen.setFill()
+            context.fill(CGRect(x: 0, y: 0, width: 1_200, height: 900))
+        }
+        let data = try XCTUnwrap(image.pngData())
+        let backgroundResult = await Task.detached {
+            ThumbnailImageCache.decode(data, maxPixelSize: 240)
+        }.value
+        let decoded = try XCTUnwrap(backgroundResult)
+        XCTAssertLessThanOrEqual(decoded.image.cgImage?.width ?? .max, 240)
+        ThumbnailImageCache.store(decoded, for: data)
+        XCTAssertTrue(ThumbnailImageCache.cachedImage(for: data) === decoded.image)
+    }
+}
+
 final class CommunicationStoreTests: XCTestCase {
+    @MainActor
+    func testPersonalPictureLibraryLoadsLazilyAndStaysWithProfileBackup() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent("profile.json")
+        let store = CommunicationStore(storageURL: url)
+        let originalProfileID = store.activeProfileID
+        let image = UIGraphicsImageRenderer(size: CGSize(width: 80, height: 60)).image { context in
+            UIColor.systemBlue.setFill()
+            context.fill(CGRect(x: 0, y: 0, width: 80, height: 60))
+        }
+        let id = try await store.addPersonalPicture(try XCTUnwrap(image.pngData()), title: "Blue cup")
+        XCTAssertEqual(store.pictureLibrary.map(\.title), ["Blue cup"])
+        try await store.renamePersonalPicture(id, title: "My blue cup")
+        let picture = try XCTUnwrap(store.pictureLibrary.first)
+        XCTAssertEqual(picture.title, "My blue cup")
+        store.addItem(label: "Hello", symbol: "👋", message: "Hello",
+                      category: "Core", imageData: nil, action: .addToMessage)
+        store.flushPersistence()
+        let savedProfile = try JSONDecoder().decode(StoredData.self, from: Data(contentsOf: url))
+        XCTAssertTrue(savedProfile.pictureLibrary.isEmpty, "Routine profile saves should not embed library photos")
+
+        let reopened = CommunicationStore(storageURL: url)
+        XCTAssertTrue(reopened.pictureLibrary.isEmpty, "The library should not be decoded during app startup")
+        try await reopened.loadPersonalPictures()
+        XCTAssertEqual(reopened.pictureLibrary.first?.id, id)
+        XCTAssertTrue(reopened.addProfile("Another communicator"))
+        let otherProfileID = reopened.activeProfileID
+        try await reopened.loadPersonalPictures()
+        XCTAssertTrue(reopened.pictureLibrary.isEmpty)
+        XCTAssertTrue(reopened.switchProfile(to: originalProfileID))
+        try await reopened.loadPersonalPictures()
+        XCTAssertEqual(reopened.pictureLibrary.first?.title, "My blue cup")
+
+        let backup = try reopened.backupData()
+        XCTAssertEqual(try JSONDecoder().decode(StoredData.self, from: backup).pictureLibrary.count, 1)
+        let recipient = CommunicationStore(storageURL: directory.appendingPathComponent("recipient.json"))
+        try recipient.importBackup(backup)
+        recipient.flushPersistence()
+        let recipientAgain = CommunicationStore(storageURL: directory.appendingPathComponent("recipient.json"))
+        XCTAssertTrue(recipientAgain.pictureLibrary.isEmpty)
+        try await recipientAgain.loadPersonalPictures()
+        XCTAssertEqual(recipientAgain.pictureLibrary.first?.title, "My blue cup")
+        var olderBackup = try XCTUnwrap(JSONSerialization.jsonObject(with: backup) as? [String: Any])
+        olderBackup.removeValue(forKey: "pictureLibrary")
+        let olderRecipient = CommunicationStore(storageURL: directory.appendingPathComponent("older.json"))
+        try olderRecipient.importBackup(JSONSerialization.data(withJSONObject: olderBackup))
+        XCTAssertTrue(olderRecipient.pictureLibrary.isEmpty)
+
+        reopened.addItem(label: "Cup", symbol: "🥤", message: "I want my cup",
+                         category: "Needs", imageData: picture.imageData, action: .addToMessage)
+        try await reopened.deletePersonalPicture(id)
+        XCTAssertTrue(reopened.pictureLibrary.isEmpty)
+        XCTAssertEqual(reopened.items.first { $0.label == "Cup" }?.imageData, picture.imageData)
+        let libraryURL = directory.appendingPathComponent("picture-library-\(originalProfileID.uuidString).json")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: libraryURL.path))
+        XCTAssertTrue(reopened.switchProfile(to: otherProfileID))
+        XCTAssertTrue(reopened.deleteProfile(id: originalProfileID))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: libraryURL.path))
+    }
+
+    func testCategoryMergePreservesOrderAndStarterNamesWithManyBoards() {
+        let customItems = (1...500).map { index in
+            CommunicationItem(label: "Word \(index)", symbol: "💬", message: "Word \(index)",
+                              category: "Board \(index)")
+        }
+        let stored = StoredData(items: StarterVocabulary.items + customItems,
+                                categories: ["food", "FAMILY", "Favorites", "board 1"],
+                                routines: [], phrases: [], settings: AppSettings())
+        XCTAssertEqual(Array(stored.categories.prefix(3)), ["Food", "FAMILY", "board 1"])
+        XCTAssertEqual(stored.categories.filter { $0 == "Board 1" || $0 == "board 1" }, ["board 1"])
+        XCTAssertEqual(stored.categories.count, StarterVocabulary.categories.count + 501)
+    }
+
+    @MainActor
+    func testStorySwitchKeysPersistAndSwapWithoutConflicts() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let file = directory.appendingPathComponent("story-switches.json")
+        let store = CommunicationStore(storageURL: file)
+        store.settings.selectStoryAdvanceKey(.rightArrow)
+        store.settings.selectStoryReadKey(.rightArrow)
+        XCTAssertEqual(store.settings.storyReadKey, .rightArrow)
+        XCTAssertEqual(store.settings.storyAdvanceKey, .returnKey)
+
+        let reopened = CommunicationStore(storageURL: file)
+        XCTAssertEqual(reopened.settings.storyReadKey, .rightArrow)
+        XCTAssertEqual(reopened.settings.storyAdvanceKey, .returnKey)
+
+        let captured = try XCTUnwrap(StorySwitchKey.captured("q"))
+        XCTAssertEqual(captured.title, "Q")
+        XCTAssertNil(StorySwitchKey(rawValue: "key-zz"))
+        reopened.settings.selectStoryReadKey(captured)
+        let customReopened = CommunicationStore(storageURL: file)
+        XCTAssertEqual(customReopened.settings.storyReadKey, captured)
+        XCTAssertEqual(customReopened.settings.storyAdvanceKey, .returnKey)
+    }
+
+    @MainActor
+    func testPersonalButtonTextAndSpacingPersistAndClampOnReload() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let file = directory.appendingPathComponent("tile-appearance.json")
+        let store = CommunicationStore(storageURL: file)
+        store.addItem(label: "Large label", symbol: "💬", message: "Large label",
+                      category: "Core", imageData: nil, labelFontSize: 26, contentPadding: 4)
+        let added = try XCTUnwrap(store.items.first { $0.label == "Large label" })
+        XCTAssertEqual(added.labelFontSize, 26)
+        XCTAssertEqual(added.contentPadding, 4)
+
+        var edited = added
+        edited.labelFontSize = 99
+        edited.contentPadding = -5
+        store.updateItem(edited)
+        let reopened = CommunicationStore(storageURL: file)
+        let saved = try XCTUnwrap(reopened.items.first { $0.id == added.id })
+        XCTAssertEqual(saved.labelFontSize, 30)
+        XCTAssertEqual(saved.contentPadding, 0)
+        XCTAssertNil(reopened.items.first { $0.label == "I" }?.labelFontSize)
+    }
+
+    @MainActor
+    func testSpeechEnginesAreCreatedOnlyForRequestedSpeech() {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = CommunicationStore(storageURL: directory.appendingPathComponent("speech-startup.json"))
+        XCTAssertFalse(store.speechEnginesInitialized.primary)
+        XCTAssertFalse(store.speechEnginesInitialized.cue)
+
+        store.stopSpeaking()
+        store.stopScanCue()
+        XCTAssertFalse(store.speechEnginesInitialized.primary)
+        XCTAssertFalse(store.speechEnginesInitialized.cue)
+
+        store.speak("Hello")
+        XCTAssertTrue(store.speechEnginesInitialized.primary)
+        XCTAssertFalse(store.speechEnginesInitialized.cue)
+        store.stopSpeaking()
+
+        let cueStore = CommunicationStore(storageURL: directory.appendingPathComponent("cue-startup.json"))
+        cueStore.settings.scanEnabled = true
+        cueStore.settings.scanCueMode = .spoken
+        cueStore.previewScanCue(ScanCue(text: "Next", language: "en"))
+        XCTAssertFalse(cueStore.speechEnginesInitialized.primary)
+        XCTAssertTrue(cueStore.speechEnginesInitialized.cue)
+        cueStore.stopScanCue()
+    }
+
     @MainActor
     func testMovingIntoEmptyGridPositionPreservesSpacingAndSurvivesBackup() throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
@@ -1203,5 +1452,128 @@ final class CommunicationStoreTests: XCTestCase {
         store.endSettingsAdjustment()
         XCTAssertEqual(store.persistenceWriteCount, beforeAdjustment + 1)
         XCTAssertEqual(CommunicationStore(storageURL: file).settings.speechVolume, 0.55)
+    }
+
+    @MainActor
+    func testReminderRestoreReadsSchedulesWithoutDecodingBoardContent() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = CommunicationStore(storageURL: directory.appendingPathComponent("reminders.json"))
+        store.addRoutineStep("Wash hands", symbol: "🧼")
+        XCTAssertTrue(store.saveRoutineTemplate(name: "Morning"))
+
+        var document = try XCTUnwrap(JSONSerialization.jsonObject(with: store.backupData()) as? [String: Any])
+        document["items"] = "This board data should be ignored"
+        let data = try JSONSerialization.data(withJSONObject: document)
+        let snapshot = try JSONDecoder().decode(ReminderProfileSnapshot.self, from: data)
+        XCTAssertEqual(snapshot.routineTemplates.map(\.name), ["Morning"])
+        XCTAssertTrue(snapshot.routineReminders.isEmpty)
+
+        let legacy = try JSONDecoder().decode(ReminderProfileSnapshot.self, from: Data("{}".utf8))
+        XCTAssertTrue(legacy.routineTemplates.isEmpty)
+        XCTAssertTrue(legacy.routineReminders.isEmpty)
+    }
+
+    @MainActor
+    func testThousandWordProfileLoadPerformance() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let file = directory.appendingPathComponent("large-profile.json")
+        let store = CommunicationStore(storageURL: file)
+        let entries = (1...1_000).map { index in
+            BulkVocabularyEntry(label: "Word \(index)", symbol: "💬", message: "Word \(index)")
+        }
+        _ = store.addBulkItems(entries, to: "Core")
+        store.flushPersistence()
+
+        let options = XCTMeasureOptions()
+        options.iterationCount = 3
+        measure(metrics: [XCTClockMetric()], options: options) {
+            let loaded = CommunicationStore(storageURL: file)
+            XCTAssertGreaterThanOrEqual(loaded.items.count, 1_000)
+        }
+    }
+
+    @MainActor
+    func testCommunicationUseIsOptInPrivateAndPerProfileAndSurvivesBackup() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = CommunicationStore(storageURL: directory.appendingPathComponent("usage.json"))
+        let item = try XCTUnwrap(store.items.first { $0.effectiveAction == .addToMessage })
+
+        store.select(item)
+        XCTAssertTrue(store.usageEvents.isEmpty)
+        store.settings.recordCommunicationUse = true
+        store.select(item)
+        XCTAssertEqual(store.usageEvents.map(\.kind), [.pictureButton])
+        XCTAssertEqual(store.usageEvents.first?.itemID, item.id)
+
+        store.beginPrivateConversation()
+        store.select(item)
+        XCTAssertEqual(store.usageEvents.count, 1)
+        store.endPrivateConversation()
+
+        XCTAssertTrue(store.addPhrase("Please wait for me"))
+        let phrase = try XCTUnwrap(store.phrases.first { $0.text == "Please wait for me" })
+        store.speakPhrase(phrase)
+        XCTAssertEqual(store.usageEvents.map(\.kind), [.savedPhrase, .pictureButton])
+
+        store.settings.recordCommunicationUse = false
+        store.select(item)
+        XCTAssertEqual(store.usageEvents.count, 2)
+        let backup = try store.backupData()
+        let restored = CommunicationStore(storageURL: directory.appendingPathComponent("restored.json"))
+        try restored.importBackup(backup)
+        XCTAssertEqual(restored.usageEvents.count, 2)
+        XCTAssertFalse(restored.settings.recordCommunicationUse)
+
+        let originalProfile = store.activeProfileID
+        XCTAssertTrue(store.addProfile("Another voice"))
+        XCTAssertTrue(store.usageEvents.isEmpty)
+        XCTAssertTrue(store.switchProfile(to: originalProfile))
+        XCTAssertEqual(store.usageEvents.count, 2)
+        store.clearCommunicationUse()
+        XCTAssertTrue(store.usageEvents.isEmpty)
+
+        var legacy = try XCTUnwrap(JSONSerialization.jsonObject(with: backup) as? [String: Any])
+        legacy.removeValue(forKey: "usageEvents")
+        var legacySettings = try XCTUnwrap(legacy["settings"] as? [String: Any])
+        legacySettings.removeValue(forKey: "recordCommunicationUse")
+        legacy["settings"] = legacySettings
+        let decoded = try JSONDecoder().decode(StoredData.self,
+            from: JSONSerialization.data(withJSONObject: legacy))
+        XCTAssertTrue(decoded.usageEvents.isEmpty)
+        XCTAssertFalse(decoded.settings.recordCommunicationUse)
+    }
+
+    func testCommunicationUseCSVQuotesUserTextAndBoundsImportedRecords() {
+        var event = CommunicationUsageEvent(kind: .pictureButton, label: "=SUM(1,2)", board: "A\"B")
+        event.date = Date(timeIntervalSince1970: 0)
+        let csv = CommunicationUsageEvent.csv([event])
+        XCTAssertTrue(csv.contains("\"'=SUM(1,2)\""))
+        XCTAssertTrue(csv.contains("\"A\"\"B\""))
+        let cleaned = CommunicationUsageEvent.cleaned(Array(repeating: event, count: 1_001))
+        XCTAssertEqual(cleaned.count, CommunicationUsageEvent.maximumCount)
+        XCTAssertEqual(Set(cleaned.map(\.id)).count, CommunicationUsageEvent.maximumCount)
+    }
+
+    @MainActor
+    func testBackupPreviewLoadsOnlyBoardSummary() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = CommunicationStore(storageURL: directory.appendingPathComponent("profile.json"))
+        let original = try store.backupData()
+        let url = directory.appendingPathComponent("backup.json")
+        try original.write(to: url)
+
+        let pending = try await PendingBackupImport.load(from: url)
+        XCTAssertEqual(pending.data, original)
+        XCTAssertEqual(pending.preview.categories, store.categories)
+        XCTAssertEqual(pending.preview.buttonCount, store.items.count)
+        for category in store.categories {
+            XCTAssertEqual(pending.preview.buttonCountsByCategory[category, default: 0],
+                           store.items.filter { $0.category == category }.count)
+        }
     }
 }

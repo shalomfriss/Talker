@@ -56,6 +56,88 @@ final class VisualCalendarTests: XCTestCase {
         XCTAssertFalse(plan.events[0].isComplete(on: date(2026, 11, 8), calendar: calendar))
     }
 
+    @MainActor
+    func testLinkedCalendarEventAwardsOncePerOccurrenceAndSurvivesBackup() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent("calendar-rewards.json")
+        let store = CommunicationStore(storageURL: url)
+        let chart = try XCTUnwrap(store.addRewardChart(title: "Visit stars", reward: "Choose music",
+                                                        targetTokens: 2))
+        let first = date(2026, 11, 2)
+        let second = date(2026, 11, 9)
+        let third = date(2026, 11, 16)
+        let event = CalendarEvent(option: ChoiceOption(label: "Library"), startDate: first,
+                                  repeatRule: .weekly, rewardChartID: chart.id)
+        XCTAssertTrue(store.addCalendarEvent(event))
+
+        store.toggleCalendarEvent(id: event.id, on: first)
+        XCTAssertEqual(store.rewardCharts[0].earnedTokens, 1)
+        store.toggleCalendarEvent(id: event.id, on: first)
+        store.toggleCalendarEvent(id: event.id, on: first)
+        XCTAssertEqual(store.rewardCharts[0].earnedTokens, 1)
+        XCTAssertTrue(store.visualCalendar.events[0].hasEarnedReward(on: first))
+
+        store.toggleCalendarEvent(id: event.id, on: second)
+        store.toggleCalendarEvent(id: event.id, on: third)
+        XCTAssertEqual(store.rewardCharts[0].earnedTokens, 2)
+        XCTAssertFalse(store.visualCalendar.events[0].hasEarnedReward(on: third))
+        XCTAssertTrue(store.startRewardChartAgain(id: chart.id))
+        store.toggleCalendarEvent(id: event.id, on: third)
+        store.toggleCalendarEvent(id: event.id, on: third)
+        XCTAssertEqual(store.rewardCharts[0].earnedTokens, 1)
+
+        store.flushPersistence()
+        let reopened = CommunicationStore(storageURL: url)
+        XCTAssertEqual(reopened.rewardCharts[0].earnedTokens, 1)
+        XCTAssertTrue(reopened.visualCalendar.events[0].hasEarnedReward(on: third))
+        let restored = CommunicationStore(storageURL: directory.appendingPathComponent("restored.json"))
+        try restored.importBackup(store.backupData())
+        XCTAssertEqual(restored.visualCalendar.events[0].rewardChartID, chart.id)
+        XCTAssertEqual(restored.rewardCharts[0].earnedTokens, 1)
+        XCTAssertTrue(restored.visualCalendar.events[0].hasEarnedReward(on: second))
+    }
+
+    @MainActor
+    func testCalendarRewardLinkChangesAndChartDeletionClearAwardHistory() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = CommunicationStore(storageURL: directory.appendingPathComponent("calendar-reward-links.json"))
+        let firstChart = try XCTUnwrap(store.addRewardChart(title: "First", reward: "Music"))
+        let secondChart = try XCTUnwrap(store.addRewardChart(title: "Second", reward: "Story"))
+        let day = date(2026, 11, 2)
+        var event = CalendarEvent(option: ChoiceOption(label: "Park"), startDate: day,
+                                  rewardChartID: firstChart.id)
+        XCTAssertTrue(store.addCalendarEvent(event))
+        store.toggleCalendarEvent(id: event.id, on: day)
+        XCTAssertTrue(store.visualCalendar.events[0].hasEarnedReward(on: day))
+
+        event.rewardChartID = secondChart.id
+        XCTAssertTrue(store.updateCalendarEvent(event))
+        XCTAssertFalse(store.visualCalendar.events[0].hasEarnedReward(on: day))
+        XCTAssertEqual(store.visualCalendar.events[0].rewardChartID, secondChart.id)
+        XCTAssertTrue(store.deleteRewardChart(id: secondChart.id))
+        XCTAssertNil(store.visualCalendar.events[0].rewardChartID)
+        XCTAssertNil(store.visualCalendar.events[0].rewardedDates)
+
+        let firstProfile = store.activeProfileID
+        XCTAssertTrue(store.addProfile("Other communicator"))
+        XCTAssertTrue(store.visualCalendar.events.isEmpty)
+        XCTAssertTrue(store.switchProfile(to: firstProfile))
+        XCTAssertEqual(store.visualCalendar.events.count, 1)
+    }
+
+    func testOlderCalendarEventDecodesWithoutRewardFields() throws {
+        let event = CalendarEvent(option: ChoiceOption(label: "Library"), startDate: date(2026, 11, 2))
+        var object = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(event)) as? [String: Any])
+        object.removeValue(forKey: "rewardChartID")
+        object.removeValue(forKey: "rewardedDates")
+        let decoded = try JSONDecoder().decode(CalendarEvent.self,
+                                               from: JSONSerialization.data(withJSONObject: object))
+        XCTAssertNil(decoded.rewardChartID)
+        XCTAssertFalse(decoded.hasEarnedReward(on: event.startDate, calendar: calendar))
+    }
+
     func testReminderScheduleMatchesOneTimeAndRepeatingEvents() throws {
         let reminder = CalendarEventReminder(hour: 9, minute: 30, playsSound: true)
         var event = CalendarEvent(option: ChoiceOption(label: "Visit"),

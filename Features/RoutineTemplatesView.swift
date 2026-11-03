@@ -135,7 +135,7 @@ private struct RoutineTemplateDetailView: View {
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                 }
-                Section("Reward for finishing") {
+                Section("Routine rewards") {
                     if store.rewardCharts.isEmpty {
                         NavigationLink {
                             RewardChartsView()
@@ -165,18 +165,40 @@ private struct RoutineTemplateDetailView: View {
                             }
                         }
                         .accessibilityIdentifier("routine-template-reward-chart")
+                        if template.rewardChartID != nil {
+                            Menu {
+                                ForEach(RoutineRewardFrequency.allCases, id: \.self) { frequency in
+                                    Button(frequency.label) {
+                                        _ = store.setRoutineTemplateRewardFrequency(id: templateID, frequency: frequency)
+                                    }
+                                }
+                            } label: {
+                                HStack {
+                                    Text("Earn a token for")
+                                    Spacer()
+                                    Text(template.rewardFrequency.label)
+                                        .foregroundStyle(.secondary)
+                                    Image(systemName: "chevron.up.chevron.down")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
+                            }
+                            .accessibilityIdentifier("routine-template-reward-frequency")
+                        }
                     }
-                    Text("Finishing every step on the First/Then board adds one token to the linked chart. Starting the board again allows another token. Communication remains available at any point.")
+                    Text(template.rewardFrequency == .eachStep
+                         ? "Each step you finish on the saved board adds one token to the linked chart. Undoing and finishing the same step again will not add another token until you start the board again."
+                         : "Finishing every step on the saved board adds one token to the linked chart. Starting the board again allows another token. Communication remains available at any point.")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                 }
                 Section("Steps") {
                     ForEach(Array(template.steps.enumerated()), id: \.offset) { index, step in
                         HStack(spacing: 12) {
-                            if let imageData = step.displayImageData, let image = UIImage(data: imageData) {
-                                Image(uiImage: image)
-                                    .resizable()
-                                    .scaledToFill()
+                            if let imageData = step.displayImageData {
+                                AsyncThumbnailImage(data: imageData, maxPixelSize: 120) {
+                                    Text(step.symbol).font(.title2)
+                                }
                                     .frame(width: 44, height: 44)
                                     .clipShape(RoundedRectangle(cornerRadius: 8))
                                     .accessibilityHidden(true)

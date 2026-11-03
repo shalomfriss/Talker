@@ -2,6 +2,28 @@ import XCTest
 @testable import OpenVoice
 
 final class ConversationDraftTests: XCTestCase {
+    @MainActor
+    func testUnchangedDraftDoesNotSaveAndPendingTypedDraftFlushesOnce() {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let file = directory.appendingPathComponent("source.json")
+        let store = CommunicationStore(storageURL: file)
+        let initialWrites = store.persistenceWriteCount
+
+        store.flushConversationDraft()
+        XCTAssertEqual(store.persistenceWriteCount, initialWrites)
+
+        store.typedMessage = "I need a break"
+        XCTAssertEqual(store.persistenceWriteCount, initialWrites)
+        store.flushConversationDraft()
+        XCTAssertEqual(store.persistenceWriteCount, initialWrites + 1)
+        store.flushConversationDraft()
+        XCTAssertEqual(store.persistenceWriteCount, initialWrites + 1)
+
+        let relaunched = CommunicationStore(storageURL: file)
+        XCTAssertEqual(relaunched.typedMessage, "I need a break")
+    }
+
     func testOldBackupGetsOneEmptyConversation() throws {
         let stored = StoredData(items: StarterVocabulary.items, routines: StarterVocabulary.routines,
                                 phrases: StarterVocabulary.phrases, settings: AppSettings())
@@ -140,5 +162,90 @@ final class ConversationDraftTests: XCTestCase {
         XCTAssertEqual(source.conversations.count, 1)
         XCTAssertNotEqual(source.activeConversationID, schoolID)
         XCTAssertFalse(source.deleteConversation(id: source.activeConversationID))
+    }
+
+    @MainActor
+    func testPrivateConversationDiscardsDraftAndDoesNotTrainOrSaveHistory() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let file = directory.appendingPathComponent("source.json")
+        let store = CommunicationStore(storageURL: file)
+        let yes = try XCTUnwrap(store.items.first { $0.label == "yes" })
+        let no = try XCTUnwrap(store.items.first { $0.label == "no" })
+        store.settings.recentPictureWordsEnabled = true
+        store.settings.recentPhrasesEnabled = true
+        store.settings.learnPrediction = true
+        store.settings.autoClearAfterSpeaking = true
+        store.setNearbyChatSavingEnabled(true)
+        store.select(yes)
+        store.typedMessage = "Saved typed draft"
+        let savedHistory = store.history
+        let savedLearning = store.learnedPrediction
+        let savedRecents = store.settings.recentPictureWordIDs
+        let savedRecentPhrases = store.settings.recentPhraseIDs
+
+        store.beginPrivateConversation()
+        XCTAssertTrue(store.isPrivateConversationActive)
+        XCTAssertEqual(store.activeConversationName, "Private conversation")
+        XCTAssertTrue(store.messageParts.isEmpty)
+        XCTAssertTrue(store.typedMessage.isEmpty)
+        store.select(no)
+        store.typedMessage = "A private typed message"
+        store.speakMessage()
+        store.stopSpeaking()
+        store.select(yes)
+        XCTAssertEqual(store.composedMessage, "yes")
+        store.clearMessage()
+        XCTAssertTrue(store.canUndoClearMessage)
+        store.undoClearMessage()
+        XCTAssertEqual(store.composedMessage, "yes")
+        store.speak(store.typedMessage, saveToHistory: true, followAlong: .typed)
+        store.stopSpeaking()
+        if let phrase = store.phrases.first { store.recordRecentPhrase(phrase) }
+        store.appendNearbyMessage(NearbyChatMessage(peerName: "Partner", isMine: true,
+                                                    text: "Private nearby message"))
+        store.flushConversationDraft()
+        store.flushPersistence()
+
+        XCTAssertEqual(store.history, savedHistory)
+        XCTAssertEqual(store.learnedPrediction, savedLearning)
+        XCTAssertEqual(store.settings.recentPictureWordIDs, savedRecents)
+        XCTAssertEqual(store.settings.recentPhraseIDs, savedRecentPhrases)
+        XCTAssertTrue(store.nearbyMessages.isEmpty)
+        XCTAssertEqual(store.conversations.count, 1)
+        XCTAssertEqual(store.conversations[0].typedMessage, "Saved typed draft")
+        XCTAssertEqual(store.conversations[0].messageParts, ["yes"])
+        XCTAssertNil(store.conversations[0].clearedPictureMessage)
+
+        let relaunched = CommunicationStore(storageURL: file)
+        XCTAssertFalse(relaunched.isPrivateConversationActive)
+        XCTAssertEqual(relaunched.typedMessage, "Saved typed draft")
+        XCTAssertEqual(relaunched.composedMessage, "yes")
+        let backup = try JSONDecoder().decode(StoredData.self, from: store.backupData())
+        XCTAssertEqual(backup.conversations[0].typedMessage, "Saved typed draft")
+        XCTAssertEqual(backup.conversations[0].messageParts, ["yes"])
+
+        store.endPrivateConversation()
+        XCTAssertFalse(store.isPrivateConversationActive)
+        XCTAssertEqual(store.typedMessage, "Saved typed draft")
+        XCTAssertEqual(store.composedMessage, "yes")
+        XCTAssertFalse(store.canUndoClearMessage)
+    }
+
+    @MainActor
+    func testSwitchingSavedConversationDiscardsPrivateSession() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = CommunicationStore(storageURL: directory.appendingPathComponent("source.json"))
+        let firstID = store.activeConversationID
+        XCTAssertTrue(store.addConversation("School"))
+        store.typedMessage = "School message"
+        store.beginPrivateConversation()
+        store.typedMessage = "Private message"
+        XCTAssertTrue(store.switchConversation(to: firstID))
+        XCTAssertFalse(store.isPrivateConversationActive)
+        XCTAssertTrue(store.typedMessage.isEmpty)
+        XCTAssertTrue(store.switchConversation(to: store.conversations.first { $0.name == "School" }!.id))
+        XCTAssertEqual(store.typedMessage, "School message")
     }
 }

@@ -1,3 +1,4 @@
+import AVFoundation
 import PhotosUI
 import SwiftUI
 import UIKit
@@ -8,6 +9,7 @@ struct SceneEditorView: View {
     @Environment(\.dismiss) private var dismiss
     let board: VisualSceneBoard?
     @State private var title: String
+    @State private var pastingPhoto = false
     @State private var imageData: Data?
     @State private var videoData: Data?
     @State private var hotspots: [SceneHotspot]
@@ -19,10 +21,13 @@ struct SceneEditorView: View {
     @State private var hotspotVideoImportID: UUID?
     @State private var preparingVideo = false
     @State private var preparingHotspotVideoID: UUID?
+    @State private var recognizingPhotoWords = false
+    @State private var photoWordReview: PhotoBoardReview?
     @State private var showingWordPicker = false
     @State private var customWord = ""
     @State private var errorMessage: String?
     @State private var expandedHotspotIDs: Set<UUID> = []
+    @State private var recordingHotspot: SceneHotspot?
 
     init(board: VisualSceneBoard?) {
         self.board = board
@@ -44,8 +49,19 @@ struct SceneEditorView: View {
                         Label("Choose or change photo", systemImage: "photo")
                     }
                     .disabled(preparingVideo)
+                    PictureLibraryPickerButton(title: "Picture library",
+                                               identifier: "scene-picture-library") { picture in
+                        imageData = picture.imageData
+                        videoData = nil
+                    }
+                    .disabled(preparingVideo)
                     CameraPhotoButton { imageData = $0; videoData = nil }
                         .disabled(preparingVideo)
+                    PastePhotoButton(identifier: "scene-paste-photo", onPastingChange: { pastingPhoto = $0 }) {
+                        imageData = $0
+                        videoData = nil
+                    }
+                    .disabled(preparingVideo)
                     Button("Choose photo from Files", systemImage: "folder") {
                         showingPhotoImporter = true
                     }
@@ -80,6 +96,17 @@ struct SceneEditorView: View {
                         }
                         .coordinateSpace(name: "sceneCanvas")
                         .accessibilityIdentifier("scene-photo-preview")
+                        if videoData == nil && hotspots.count < 12 {
+                            Button("Find words in photo", systemImage: "text.viewfinder") {
+                                findWords(in: imageData)
+                            }
+                            .accessibilityIdentifier("scene-find-photo-words")
+                            .disabled(recognizingPhotoWords || preparingVideo)
+                            Text("Review recognized text before adding it. Existing markers stay in place.")
+                                .font(.footnote)
+                                .foregroundStyle(.secondary)
+                        }
+                        if recognizingPhotoWords { ProgressView("Reading photo") }
                     } else {
                         Text("Choose a familiar photo or short video for the communicator.")
                             .foregroundStyle(.secondary)
@@ -127,7 +154,7 @@ struct SceneEditorView: View {
                                 }
                             } label: {
                                 HStack {
-                                    Text("Size, color, speech, and video")
+                                    Text("Size, color, voice, and video")
                                     Spacer()
                                     Image(systemName: expandedHotspotIDs.contains(hotspot.id)
                                           ? "chevron.up" : "chevron.down")
@@ -165,7 +192,7 @@ struct SceneEditorView: View {
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Save") { save() }
                         .disabled(title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ||
-                                  imageData == nil || hotspots.isEmpty || preparingVideo ||
+                                  imageData == nil || hotspots.isEmpty || preparingVideo || pastingPhoto ||
                                   preparingHotspotVideoID != nil)
                         .accessibilityIdentifier("save-scene")
                 }
@@ -173,20 +200,35 @@ struct SceneEditorView: View {
             .sheet(isPresented: $showingWordPicker) {
                 SceneWordPickerView { item in addWord(item) }
             }
-            .fileImporter(isPresented: $showingPhotoImporter, allowedContentTypes: [.image]) { result in
-                do {
-                    let url = try result.get()
-                    let access = url.startAccessingSecurityScopedResource()
-                    defer { if access { url.stopAccessingSecurityScopedResource() } }
-                    let data = try Data(contentsOf: url)
-                    guard let prepared = PhotoProcessing.preparedData(from: data) else {
-                        errorMessage = "This file is not a usable image. Choose another photo."
-                        return
+            .sheet(item: $recordingHotspot) { hotspot in
+                SceneHotspotVoiceEditor(label: label(for: hotspot),
+                                        audioData: hotspot.recordedAudioData) { data in
+                    updateHotspot(hotspot.id) { $0.recordedAudioData = data }
+                }
+            }
+            .sheet(item: $photoWordReview) { review in
+                PhotoBoardWordsReviewView(words: review.words, availableSlots: 12 - hotspots.count) { selected in
+                    for word in selected {
+                        let option = ChoiceOption(label: word.text)
+                        hotspots.append(SceneHotspot(option: option, x: word.x, y: word.y,
+                                                     width: word.width, height: word.height))
                     }
-                    imageData = prepared
-                    videoData = nil
-                } catch {
-                    errorMessage = "Could not open that image. Choose another photo or file."
+                    photoWordReview = nil
+                }
+            }
+            .fileImporter(isPresented: $showingPhotoImporter, allowedContentTypes: [.image]) { result in
+                Task {
+                    do {
+                        let url = try result.get()
+                        guard let prepared = try await PhotoProcessing.preparedDataAsync(fromFile: url) else {
+                            errorMessage = "This file is not a usable image. Choose another photo."
+                            return
+                        }
+                        imageData = prepared
+                        videoData = nil
+                    } catch {
+                        errorMessage = "Could not open that image. Choose another photo or file."
+                    }
                 }
             }
             .fileImporter(isPresented: $showingVideoImporter, allowedContentTypes: [.movie]) { result in
@@ -221,7 +263,7 @@ struct SceneEditorView: View {
                 Task {
                     do {
                         let data = try await photo.loadTransferable(type: Data.self)
-                        guard let data, let prepared = PhotoProcessing.preparedData(from: data) else {
+                        guard let data, let prepared = await PhotoProcessing.preparedDataAsync(from: data) else {
                             errorMessage = "Could not open that photo. Try another photo or choose an image from Files."
                             return
                         }
@@ -276,6 +318,7 @@ struct SceneEditorView: View {
             $0.destinationSceneID = id
             $0.videoData = nil
             $0.videoPosterData = nil
+            if id != nil { $0.recordedAudioData = nil }
         }
     }
 
@@ -283,6 +326,18 @@ struct SceneEditorView: View {
     private func hotspotControls(for hotspot: SceneHotspot) -> some View {
         let id = hotspot.id
         VStack(alignment: .leading, spacing: 10) {
+            if !store.items.contains(where: { $0.id == hotspot.option.id }) {
+                TextField("Marker label", text: Binding(
+                    get: { hotspots.first(where: { $0.id == id })?.option.label ?? "" },
+                    set: { value in
+                        updateHotspot(id) {
+                            if $0.option.message == $0.option.label { $0.option.message = value }
+                            $0.option.label = value
+                        }
+                    }
+                ))
+                .accessibilityIdentifier("scene-marker-label-\(id)")
+            }
             HStack {
                 Text("Width")
                 Slider(value: Binding(
@@ -321,6 +376,18 @@ struct SceneEditorView: View {
                 set: { value in updateHotspot(id) { $0.showsLabel = value } }
             ))
             .accessibilityIdentifier("scene-show-label-\(id)")
+            if hotspot.destinationSceneID == nil && hotspot.videoData == nil {
+                Button(hotspot.recordedAudioData == nil ? "Record personal voice" : "Edit personal voice",
+                       systemImage: "mic.fill") {
+                    recordingHotspot = hotspot
+                }
+                .buttonStyle(.bordered)
+                .accessibilityIdentifier("scene-record-voice-\(id)")
+                if hotspot.recordedAudioData != nil {
+                    Label("Personal voice attached", systemImage: "waveform")
+                        .foregroundStyle(.secondary)
+                }
+            }
             hotspotVideoControls(for: hotspot)
             TextField("Spoken text (uses word by default)", text: Binding(
                 get: { hotspots.first(where: { $0.id == id })?.spokenText ?? "" },
@@ -350,11 +417,11 @@ struct SceneEditorView: View {
     @ViewBuilder
     private func hotspotVideoControls(for hotspot: SceneHotspot) -> some View {
         let id = hotspot.id
-        if let poster = hotspot.videoPosterData, let image = UIImage(data: poster) {
+        if let poster = hotspot.videoPosterData {
             HStack {
-                Image(uiImage: image)
-                    .resizable()
-                    .scaledToFill()
+                AsyncThumbnailImage(data: poster, maxPixelSize: 200) {
+                    Image(systemName: "video").font(.title)
+                }
                     .frame(width: 80, height: 60)
                     .clipped()
                 Text("This marker plays its video when tapped.")
@@ -390,6 +457,21 @@ struct SceneEditorView: View {
         guard let index = hotspots.firstIndex(where: { $0.id == id }) else { return }
         update(&hotspots[index])
         hotspots[index] = hotspots[index].moved(toX: hotspots[index].x, y: hotspots[index].y)
+    }
+
+    private func findWords(in sourceData: Data) {
+        recognizingPhotoWords = true
+        Task {
+            do {
+                let found = try await Task.detached(priority: .userInitiated) {
+                    try PhotoBoardRecognition.recognize(imageData: sourceData)
+                }.value
+                if imageData == sourceData { photoWordReview = PhotoBoardReview(words: found) }
+            } catch {
+                if imageData == sourceData { errorMessage = error.localizedDescription }
+            }
+            recognizingPhotoWords = false
+        }
     }
 
     private func addWord(_ item: CommunicationItem) {
@@ -463,6 +545,7 @@ struct SceneEditorView: View {
             }
             updateHotspot(id) {
                 $0.destinationSceneID = nil
+                $0.recordedAudioData = nil
                 $0.videoData = prepared.video
                 $0.videoPosterData = prepared.poster
             }
@@ -478,6 +561,81 @@ struct SceneEditorView: View {
                                      imageData: imageData, hotspots: hotspots, videoData: videoData)
         if store.saveSceneBoard(saved) { dismiss() }
         else { errorMessage = "Choose a unique scene name and check each word." }
+    }
+}
+
+private struct PhotoBoardReview: Identifiable {
+    let id = UUID()
+    let words: [PhotoBoardWord]
+}
+
+private struct PhotoBoardWordsReviewView: View {
+    @Environment(\.dismiss) private var dismiss
+    @State private var words: [PhotoBoardWord]
+    @State private var selectedIDs: Set<UUID>
+    let availableSlots: Int
+    let onAdd: ([PhotoBoardWord]) -> Void
+
+    init(words: [PhotoBoardWord], availableSlots: Int, onAdd: @escaping ([PhotoBoardWord]) -> Void) {
+        _words = State(initialValue: words)
+        _selectedIDs = State(initialValue: Set(words.prefix(availableSlots).map(\.id)))
+        self.availableSlots = availableSlots
+        self.onAdd = onAdd
+    }
+
+    private var selectedWords: [PhotoBoardWord] {
+        words.filter { selectedIDs.contains($0.id) }.compactMap { word in
+            var edited = word
+            edited.text = word.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            return edited.text.isEmpty ? nil : edited
+        }
+    }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section {
+                    Text("Check the recognized words here. After adding them, review and move their markers on the photo before saving.")
+                        .foregroundStyle(.secondary)
+                    Text("\(availableSlots) marker spaces available")
+                        .font(.subheadline.weight(.semibold))
+                }
+                Section("Words found") {
+                    ForEach($words) { $word in
+                        HStack {
+                            Toggle("Include \(word.text)", isOn: Binding(
+                                get: { selectedIDs.contains(word.id) },
+                                set: { include in
+                                    if include && selectedIDs.count < availableSlots {
+                                        selectedIDs.insert(word.id)
+                                    } else if !include {
+                                        selectedIDs.remove(word.id)
+                                    }
+                                }
+                            ))
+                            .labelsHidden()
+                            .disabled(!selectedIDs.contains(word.id) && selectedIDs.count >= availableSlots)
+                            TextField("Recognized word", text: $word.text)
+                                .accessibilityIdentifier("photo-board-word-\(word.id)")
+                        }
+                    }
+                }
+            }
+            .navigationTitle("Review photo words")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { dismiss() }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Add \(selectedWords.count) words") {
+                        onAdd(selectedWords)
+                    }
+                    .disabled(selectedWords.isEmpty)
+                    .accessibilityIdentifier("add-reviewed-photo-words")
+                }
+            }
+        }
     }
 }
 
@@ -509,6 +667,92 @@ private struct SceneHotspotVideoPicker: View {
                 } catch { onError(error) }
                 selectedVideo = nil
             }
+        }
+    }
+}
+
+private struct SceneHotspotVoiceEditor: View {
+    @EnvironmentObject private var store: CommunicationStore
+    @Environment(\.dismiss) private var dismiss
+    @StateObject private var recorder = AudioMessageRecorder()
+    @State private var audioData: Data?
+    @State private var isPreparing = false
+    @State private var errorMessage: String?
+
+    let label: String
+    let onSave: (Data?) -> Void
+
+    init(label: String, audioData: Data?, onSave: @escaping (Data?) -> Void) {
+        self.label = label
+        self.onSave = onSave
+        _audioData = State(initialValue: audioData)
+    }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section("Scene word") {
+                    Text(label).font(.title3.weight(.medium))
+                    Text("A personal voice plays when this marker speaks. Its words still appear in the message.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+                Section("Personal voice") {
+                    Button(recorder.isRecording ? "Stop recording" : "Record a voice",
+                           systemImage: recorder.isRecording ? "stop.circle.fill" : "mic.fill") {
+                        if recorder.isRecording {
+                            guard let data = recorder.stop(), !data.isEmpty,
+                                  data.count <= 10 * 1_048_576,
+                                  (try? AVAudioPlayer(data: data)) != nil else {
+                                errorMessage = "The recording could not be saved. Try again."
+                                return
+                            }
+                            audioData = data
+                            errorMessage = nil
+                        } else {
+                            isPreparing = true
+                            Task {
+                                await recorder.start()
+                                isPreparing = false
+                            }
+                        }
+                    }
+                    .disabled(isPreparing)
+                    .accessibilityIdentifier("scene-voice-record-toggle")
+                    if isPreparing { ProgressView("Preparing microphone") }
+                    if recorder.isRecording {
+                        Label("Recording", systemImage: "waveform")
+                            .foregroundStyle(.red)
+                    }
+                    if let audioData {
+                        Button("Play preview", systemImage: "play.fill") {
+                            store.playRecorded(audioData)
+                        }
+                        .disabled(recorder.isRecording || isPreparing)
+                        .accessibilityIdentifier("scene-voice-preview")
+                        Button("Remove recording", role: .destructive) { self.audioData = nil }
+                            .disabled(recorder.isRecording || isPreparing)
+                            .accessibilityIdentifier("scene-voice-remove")
+                    }
+                    if let error = errorMessage ?? recorder.errorMessage {
+                        Text(error).foregroundStyle(.red)
+                    }
+                }
+            }
+            .navigationTitle("Scene voice")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Save") {
+                        onSave(audioData)
+                        dismiss()
+                    }
+                    .disabled(recorder.isRecording || isPreparing)
+                    .accessibilityIdentifier("scene-voice-save")
+                }
+            }
+            .onDisappear { recorder.discard() }
         }
     }
 }

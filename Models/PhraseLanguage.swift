@@ -1,9 +1,48 @@
 import AVFoundation
+import Combine
 import Foundation
 
+struct SpeechVoiceOption: Identifiable, Sendable {
+    let identifier: String
+    let name: String
+    let language: String
+    let isPersonalVoice: Bool
+    var id: String { identifier }
+}
+
+@MainActor
+final class SpeechVoiceCatalog: ObservableObject {
+    static let shared = SpeechVoiceCatalog()
+    @Published private(set) var voices: [SpeechVoiceOption] = []
+    private var loading = false
+
+    private init() {}
+
+    func refresh() {
+        guard !loading else { return }
+        loading = true
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let options = AVSpeechSynthesisVoice.speechVoices().map { voice in
+                SpeechVoiceOption(identifier: voice.identifier, name: voice.name,
+                                  language: voice.language,
+                                  isPersonalVoice: voice.voiceTraits.contains(.isPersonalVoice))
+            }
+            Task { @MainActor [weak self] in
+                self?.voices = options
+                self?.loading = false
+            }
+        }
+    }
+}
+
 enum PhraseLanguage {
+    @MainActor
     static var availableCodes: [String] {
-        Array(Set(AVSpeechSynthesisVoice.speechVoices().map(\.language)))
+        codes(from: SpeechVoiceCatalog.shared.voices)
+    }
+
+    static func codes(from voices: [SpeechVoiceOption]) -> [String] {
+        Array(Set(voices.map(\.language)))
             .sorted { left, right in
                 let common = ["en-US", "es-ES"]
                 let leftRank = common.firstIndex(of: left) ?? common.count

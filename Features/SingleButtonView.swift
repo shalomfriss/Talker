@@ -4,6 +4,7 @@ struct SingleButtonView: View {
     @EnvironmentObject private var store: CommunicationStore
     @Environment(\.dismiss) private var dismiss
     @State private var showingSetup = false
+    @State private var recordingPhrase: SavedPhrase?
 
     var body: some View {
         NavigationStack {
@@ -48,6 +49,12 @@ struct SingleButtonView: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) { Button("Done") { dismiss() } }
+                if !store.settings.singleButtonLocked, let phrase = store.singleButtonPhrase {
+                    ToolbarItem(placement: .topBarTrailing) {
+                        Button("Record", systemImage: "mic.fill") { recordingPhrase = phrase }
+                            .accessibilityIdentifier("single-button-record-direct")
+                    }
+                }
                 if !store.settings.singleButtonLocked || store.singleButtonPhrase == nil {
                     ToolbarItem(placement: .topBarTrailing) {
                         Button("Set up", systemImage: "gearshape") { showingSetup = true }
@@ -63,6 +70,8 @@ struct SingleButtonView: View {
                         } }
                 }
             }
+            .sheet(item: $recordingPhrase) { PhraseRecordingEditorView(phrase: $0) }
+            .onChange(of: store.activeProfileID) { _, _ in recordingPhrase = nil }
         }
     }
 }

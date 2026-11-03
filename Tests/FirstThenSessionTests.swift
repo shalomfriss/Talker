@@ -55,14 +55,36 @@ final class FirstThenSessionTests: XCTestCase {
         XCTAssertTrue(session.snapshotSteps.allSatisfy { !$0.isComplete })
     }
 
+    func testStepRewardsSurviveUndoUntilSessionResets() {
+        let template = RoutineTemplate(name: "Morning", steps: [
+            RoutineStep(title: "Shoes", symbol: "👟"),
+            RoutineStep(title: "Bus", symbol: "🚌")
+        ])
+        var session = FirstThenSession(template: template)
+        let first = session.steps[0]
+        let second = session.steps[1]
+        XCTAssertTrue(session.setComplete(first.id, to: true))
+        session.markRewarded(first)
+        XCTAssertTrue(session.wasRewarded(first))
+        XCTAssertTrue(session.setComplete(first.id, to: false))
+        XCTAssertTrue(session.wasRewarded(first))
+        XCTAssertTrue(session.setComplete(first.id, to: true))
+        session.markRewarded(second)
+        XCTAssertFalse(session.wasRewarded(second))
+        session.reset()
+        XCTAssertFalse(session.wasRewarded(first))
+    }
+
     func testOldTemplateDefaultsToAutomaticLayout() throws {
         let template = RoutineTemplate(name: "Morning", steps: [RoutineStep(title: "Shoes", symbol: "👟")])
         var object = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(template)) as? [String: Any])
         object.removeValue(forKey: "firstThenLayout")
         object.removeValue(forKey: "boardMode")
+        object.removeValue(forKey: "rewardFrequency")
         let oldData = try JSONSerialization.data(withJSONObject: object)
         XCTAssertEqual(try JSONDecoder().decode(RoutineTemplate.self, from: oldData).firstThenLayout, .automatic)
         XCTAssertEqual(try JSONDecoder().decode(RoutineTemplate.self, from: oldData).boardMode, .firstThen)
+        XCTAssertEqual(try JSONDecoder().decode(RoutineTemplate.self, from: oldData).rewardFrequency, .wholeRoutine)
     }
 
     @MainActor

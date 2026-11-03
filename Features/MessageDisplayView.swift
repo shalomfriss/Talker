@@ -139,15 +139,22 @@ private struct PictureMessageVisual: View {
                     Spacer(minLength: 0)
                 }
             }
+            if tokens.contains(where: { $0.arasaacPictogramID != nil }) {
+                Text(ARASAACPictogramService.attribution)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                    .frame(maxWidth: .infinity)
+            }
         }
     }
 
     private func tile(_ token: PictureMessageToken) -> some View {
         VStack(spacing: 6) {
-            if let data = token.imageData, let image = UIImage(data: data) {
-                Image(uiImage: image)
-                    .resizable()
-                    .scaledToFill()
+            if let data = token.imageData {
+                AsyncThumbnailImage(data: data, maxPixelSize: 160) {
+                    Text(token.symbol ?? "💬").font(.system(size: 48))
+                }
                     .frame(width: 64, height: 64)
                     .clipShape(RoundedRectangle(cornerRadius: 10))
             } else if let symbol = token.symbol, !symbol.isEmpty {

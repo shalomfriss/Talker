@@ -3,25 +3,21 @@ import Foundation
 
 @MainActor
 final class CallAudioManager: ObservableObject {
-    @Published private(set) var permission: AVAudioApplication.MicrophoneInjectionPermission
-    @Published private(set) var isEnabled: Bool
-    @Published private(set) var isCallAvailable: Bool
+    @Published private(set) var permission: AVAudioApplication.MicrophoneInjectionPermission = .undetermined
+    @Published private(set) var isEnabled = false
+    @Published private(set) var isCallAvailable = false
     @Published private(set) var isWorking = false
     @Published var errorMessage: String?
 
-    init() {
-        let initialPermission = AVAudioApplication.shared.microphoneInjectionPermission
-        permission = initialPermission
-        let session = AVAudioSession.sharedInstance()
-        isEnabled = initialPermission == .granted && session.preferredMicrophoneInjectionMode == .spokenAudio
-        isCallAvailable = session.isMicrophoneInjectionAvailable
-    }
-
     func refresh() {
-        permission = AVAudioApplication.shared.microphoneInjectionPermission
+        let currentPermission = AVAudioApplication.shared.microphoneInjectionPermission
         let session = AVAudioSession.sharedInstance()
-        isEnabled = permission == .granted && session.preferredMicrophoneInjectionMode == .spokenAudio
-        isCallAvailable = session.isMicrophoneInjectionAvailable
+        let currentlyEnabled = currentPermission == .granted &&
+            session.preferredMicrophoneInjectionMode == .spokenAudio
+        let currentlyAvailable = session.isMicrophoneInjectionAvailable
+        if permission != currentPermission { permission = currentPermission }
+        if isEnabled != currentlyEnabled { isEnabled = currentlyEnabled }
+        if isCallAvailable != currentlyAvailable { isCallAvailable = currentlyAvailable }
     }
 
     func setEnabled(_ wanted: Bool) async {

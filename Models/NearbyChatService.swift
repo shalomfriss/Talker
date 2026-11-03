@@ -25,6 +25,8 @@ final class NearbyChatService: NSObject, ObservableObject {
     private var advertiser: MCNearbyServiceAdvertiser?
     private var browser: MCNearbyServiceBrowser?
     private var invitationHandler: ((Bool, MCSession?) -> Void)?
+    private nonisolated let packetDecodeQueue = DispatchQueue(label: "org.openvoice.aac.nearby.decode",
+                                                               qos: .userInitiated)
 
     init(store: CommunicationStore, displayName: String? = nil) {
         self.store = store
@@ -87,7 +89,13 @@ final class NearbyChatService: NSObject, ObservableObject {
 
     @discardableResult
     func send(_ text: String, pictureTokens: [PictureMessageToken] = [],
-              to recipient: MCPeerID? = nil) throws -> NearbyChatMessage {
+              to recipient: MCPeerID? = nil) async throws -> NearbyChatMessage {
+        guard session?.connectedPeers.isEmpty == false else { throw NearbyChatError.noConnection }
+        var tokens: [NearbyChatToken] = []
+        tokens.reserveCapacity(min(100, pictureTokens.count))
+        for token in pictureTokens.prefix(100) {
+            tokens.append(await NearbyChatToken.prepared(from: token))
+        }
         guard let session, !session.connectedPeers.isEmpty else { throw NearbyChatError.noConnection }
         let recipients: [MCPeerID]
         if let recipient {
@@ -96,13 +104,16 @@ final class NearbyChatService: NSObject, ObservableObject {
         } else {
             recipients = session.connectedPeers
         }
-        let tokens = pictureTokens.prefix(100).map(NearbyChatToken.init)
         let message = NearbyChatMessage(peerName: myName,
                                         recipientName: recipient?.displayName ??
                                             (recipients.count == 1 ? recipients[0].displayName : "Everyone"),
                                         isMine: true,
                                         text: text.trimmingCharacters(in: .whitespacesAndNewlines), tokens: tokens)
-        let data = try NearbyChatPacket(message: message).encoded()
+        let data = try await NearbyChatPacket(message: message).encodedAsync()
+        guard isActive, self.session === session,
+              recipients.allSatisfy({ session.connectedPeers.contains($0) }) else {
+            throw NearbyChatError.noConnection
+        }
         try session.send(data, toPeers: recipients, with: .reliable)
         append(message)
         return message
@@ -181,13 +192,16 @@ extension NearbyChatService: MCSessionDelegate {
     }
 
     nonisolated func session(_ session: MCSession, didReceive data: Data, fromPeer peerID: MCPeerID) {
-        DispatchQueue.main.async { [weak self] in
-            guard let self, self.isActive, self.session?.connectedPeers.contains(peerID) == true,
-                  let packet = try? NearbyChatPacket.decode(data) else { return }
-            if self.append(NearbyChatMessage(id: packet.id, date: packet.date,
-                                             peerName: peerID.displayName, isMine: false,
-                                             text: packet.text, tokens: packet.tokens)) {
-                self.unreadCount += 1
+        packetDecodeQueue.async { [weak self] in
+            guard let packet = try? NearbyChatPacket.decode(data) else { return }
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.isActive, self.session === session,
+                      session.connectedPeers.contains(peerID) else { return }
+                if self.append(NearbyChatMessage(id: packet.id, date: packet.date,
+                                                 peerName: peerID.displayName, isMine: false,
+                                                 text: packet.text, tokens: packet.tokens)) {
+                    self.unreadCount += 1
+                }
             }
         }
     }

@@ -40,11 +40,7 @@ struct AlphabetKeyboardView: View {
 
     private var sentenceSuggestions: [String] {
         guard cursorOffset == store.typedMessage.count else { return [] }
-        return SentencePrediction.suggestions(for: store.typedMessage, phrases: store.phrases,
-                                              quickResponses: store.settings.quickResponses,
-                                              history: store.settings.saveHistory ? store.history : [],
-                                              learned: store.settings.learnPrediction ? store.learnedPrediction : nil,
-                                              language: store.settings.communicationLanguage)
+        return store.sentenceSuggestions()
     }
 
     var body: some View {
@@ -112,11 +108,7 @@ struct AlphabetKeyboardView: View {
                     }
 
                     let suggestions = cursorOffset == store.typedMessage.count
-                        ? WordPrediction.suggestions(
-                            for: store.typedMessage, items: store.localizedItems(excludingPredictionKeys: true), phrases: store.phrases,
-                            history: store.settings.saveHistory ? store.history : [],
-                            learned: store.settings.learnPrediction ? store.learnedPrediction : nil,
-                            language: store.settings.communicationLanguage)
+                        ? store.wordSuggestions()
                         : []
                     let trailingEmoji = cursorOffset == store.typedMessage.count
                         ? EmojiWordPrediction.trailingEmoji(in: store.typedMessage) : nil

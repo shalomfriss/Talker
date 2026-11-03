@@ -1,7 +1,48 @@
 import XCTest
+import UIKit
 @testable import OpenVoice
 
 final class VisualSceneBoardTests: XCTestCase {
+    func testPhotoBoardPlacementMatchesCroppedSceneCanvas() throws {
+        let box = CGRect(x: 0.20, y: 0.55, width: 0.10, height: 0.10)
+        let placement = try XCTUnwrap(PhotoBoardRecognition.placement(
+            for: box, imageSize: CGSize(width: 1600, height: 900)))
+        XCTAssertEqual(placement.midX, 1.0 / 6.0, accuracy: 0.001)
+        XCTAssertEqual(placement.midY, 0.40, accuracy: 0.001)
+        XCTAssertGreaterThanOrEqual(placement.width, 0.12)
+        XCTAssertNil(PhotoBoardRecognition.placement(
+            for: CGRect(x: 0, y: 0.55, width: 0.05, height: 0.1),
+            imageSize: CGSize(width: 1600, height: 900)))
+        let portrait = try XCTUnwrap(PhotoBoardRecognition.placement(
+            for: CGRect(x: 0.4, y: 0.45, width: 0.2, height: 0.1),
+            imageSize: CGSize(width: 600, height: 800)))
+        XCTAssertEqual(portrait.midX, 0.5, accuracy: 0.001)
+        XCTAssertEqual(portrait.midY, 0.5, accuracy: 0.001)
+        XCTAssertNil(PhotoBoardRecognition.placement(
+            for: CGRect(x: 0.4, y: 0.9, width: 0.2, height: 0.05),
+            imageSize: CGSize(width: 600, height: 800)))
+    }
+
+    @MainActor
+    func testPhotoBoardRecognitionReadsTextFromPhoto() throws {
+        let image = UIGraphicsImageRenderer(size: CGSize(width: 800, height: 600)).image { context in
+            UIColor.white.setFill()
+            context.fill(CGRect(x: 0, y: 0, width: 800, height: 600))
+            let attributes: [NSAttributedString.Key: Any] = [
+                .font: UIFont.systemFont(ofSize: 72, weight: .bold),
+                .foregroundColor: UIColor.black
+            ]
+            NSString(string: "HELP").draw(at: CGPoint(x: 80, y: 100), withAttributes: attributes)
+            NSString(string: "WATER").draw(at: CGPoint(x: 430, y: 400), withAttributes: attributes)
+        }
+        let data = try XCTUnwrap(PhotoProcessing.preparedData(from: image))
+        let found = try PhotoBoardRecognition.recognize(imageData: data)
+        let help = try XCTUnwrap(found.first { $0.text.uppercased() == "HELP" })
+        let water = try XCTUnwrap(found.first { $0.text.uppercased() == "WATER" })
+        XCTAssertLessThan(help.x, water.x)
+        XCTAssertLessThan(help.y, water.y)
+    }
+
     func testHotspotPositionClampsAndRejectsNonFiniteValues() {
         let hotspot = SceneHotspot(option: ChoiceOption(label: "Door"), x: 0.5, y: 0.5)
         XCTAssertTrue(hotspot.hasValidPosition)
@@ -29,8 +70,52 @@ final class VisualSceneBoardTests: XCTestCase {
         XCTAssertNil(decoded.showsLabel)
         XCTAssertEqual(decoded.effectiveBehavior, .speakAndAdd)
         XCTAssertNil(decoded.spokenText)
+        XCTAssertNil(decoded.recordedAudioData)
         XCTAssertNil(decoded.videoData)
         XCTAssertNil(decoded.videoPosterData)
+    }
+
+    @MainActor
+    func testRecordedSceneVoiceOverridesWordAudioAndSurvivesSharing() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let file = directory.appendingPathComponent("recorded-scene.json")
+        let store = CommunicationStore(storageURL: file)
+        let word = try XCTUnwrap(store.items.first { $0.label == "yes" })
+        var original = word
+        original.audioData = Data([1, 2])
+        let recording = Data([3, 4, 5])
+        let hotspot = SceneHotspot(option: ChoiceOption(item: word), x: 0.5, y: 0.5,
+                                   spokenText: "Please say yes", recordedAudioData: recording)
+        XCTAssertEqual(hotspot.communicationItem(using: [original]).audioData, recording)
+        XCTAssertEqual(hotspot.communicationItem(using: [original]).message, "Please say yes")
+        var withoutRecording = hotspot
+        withoutRecording.recordedAudioData = nil
+        withoutRecording.spokenText = nil
+        XCTAssertEqual(withoutRecording.communicationItem(using: [original]).audioData, Data([1, 2]))
+
+        let scene = VisualSceneBoard(title: "My voice scene", imageData: Data([9]), hotspots: [hotspot])
+        XCTAssertTrue(store.saveSceneBoard(scene))
+        let profileID = store.activeProfileID
+        XCTAssertTrue(store.addProfile("Second communicator"))
+        XCTAssertTrue(store.sceneBoards.isEmpty)
+        XCTAssertTrue(store.switchProfile(to: profileID))
+        XCTAssertEqual(CommunicationStore(storageURL: file).sceneBoards.first?.hotspots.first?.recordedAudioData,
+                       recording)
+
+        let shared = try SceneBoardTransfer.exportData(scene, using: [original])
+        let recipient = CommunicationStore(storageURL: directory.appendingPathComponent("shared.json"))
+        XCTAssertEqual(try recipient.importSceneBoard(shared).hotspots.first?.recordedAudioData, recording)
+        let restored = CommunicationStore(storageURL: directory.appendingPathComponent("backup.json"))
+        try restored.importBackup(store.backupData())
+        XCTAssertEqual(restored.sceneBoards.first?.hotspots.first?.recordedAudioData, recording)
+
+        var invalid = hotspot
+        invalid.destinationSceneID = UUID()
+        XCTAssertFalse(invalid.hasValidMedia)
+        invalid.destinationSceneID = nil
+        invalid.recordedAudioData = Data()
+        XCTAssertFalse(invalid.hasValidMedia)
     }
 
     @MainActor

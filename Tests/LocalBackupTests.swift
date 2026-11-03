@@ -43,7 +43,7 @@ final class LocalBackupTests: XCTestCase {
     }
 
     @MainActor
-    func testInvalidNameAndCorruptSnapshotCannotBeRestored() throws {
+    func testInvalidNameAndCorruptSnapshotCannotBeRestored() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
         let store = CommunicationStore(storageURL: directory.appendingPathComponent("profile.json"))
@@ -56,5 +56,12 @@ final class LocalBackupTests: XCTestCase {
             .appendingPathComponent("backup.json")
         try Data("broken".utf8).write(to: backupFile, options: .atomic)
         XCTAssertThrowsError(try store.localBackupData(id: snapshot.id))
+        let raw = try await store.localBackupDataAsync(id: snapshot.id)
+        do {
+            _ = try await PendingBackupImport.prepare(data: raw)
+            XCTFail("The preview must reject a corrupt local backup")
+        } catch is DecodingError {
+            // The preview validates the raw snapshot before showing restore controls.
+        }
     }
 }

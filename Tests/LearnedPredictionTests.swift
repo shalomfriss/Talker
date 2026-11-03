@@ -2,6 +2,22 @@ import XCTest
 @testable import OpenVoice
 
 final class LearnedPredictionTests: XCTestCase {
+    func testDenseLearnedVocabularyKeepsSuggestionsAndSentenceCompletion() {
+        var model = LearnedPredictionModel()
+        model.learn("I need quiet", language: "en")
+        model.learn("I need quiet", language: "en")
+        for number in 0..<300 {
+            let first = Character(UnicodeScalar(97 + number / 26)!)
+            let second = Character(UnicodeScalar(97 + number % 26)!)
+            model.learn("Please choose \(first)\(second)", language: "en")
+        }
+
+        XCTAssertGreaterThan(model.entries.count, 800)
+        XCTAssertEqual(model.suggestions(for: "I need ", language: "en", limit: 5), ["quiet"])
+        XCTAssertEqual(model.sentenceCompletions(for: "I ne", language: "en", limit: 4),
+                       ["I need quiet"])
+    }
+
     func testRepeatedSpeechLearnsContextAndKeepsLanguagesSeparate() {
         var model = LearnedPredictionModel()
         model.learn("I need quiet. I need water", language: "en")

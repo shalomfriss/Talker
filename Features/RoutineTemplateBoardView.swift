@@ -8,6 +8,7 @@ struct RoutineTemplateBoardView: View {
     @Environment(\.dismiss) private var dismiss
     private let templateID: UUID
     private let title: String
+    private let rewardFrequency: RoutineRewardFrequency
     private let onOpenSpeak: () -> Void
     @State private var session: FirstThenSession
     @State private var layout: FirstThenLayout
@@ -24,6 +25,7 @@ struct RoutineTemplateBoardView: View {
     init(template: RoutineTemplate, onOpenSpeak: @escaping () -> Void) {
         templateID = template.id
         title = template.name
+        rewardFrequency = template.rewardFrequency
         self.onOpenSpeak = onOpenSpeak
         _session = State(initialValue: FirstThenSession(template: template))
         _layout = State(initialValue: template.firstThenLayout)
@@ -340,6 +342,11 @@ struct RoutineTemplateBoardView: View {
                     }
                 }
                 Spacer(minLength: 0)
+                if rewardFrequency == .eachStep && session.wasRewarded(step) {
+                    Image(systemName: "star.fill")
+                        .foregroundStyle(.yellow)
+                        .accessibilityLabel("Token earned for \(step.title)")
+                }
             }
             stepActions(step)
         }
@@ -352,8 +359,10 @@ struct RoutineTemplateBoardView: View {
 
     private func stepPicture(_ step: RoutineStep, size: CGFloat) -> some View {
         Group {
-            if let data = step.displayImageData, let image = UIImage(data: data) {
-                Image(uiImage: image).resizable().scaledToFill()
+            if let data = step.displayImageData {
+                AsyncThumbnailImage(data: data, maxPixelSize: 200) {
+                    Text(step.symbol).font(.system(size: size * 0.7))
+                }
             } else {
                 Text(step.symbol).font(.system(size: size * 0.7))
             }
@@ -399,9 +408,14 @@ struct RoutineTemplateBoardView: View {
     private func setStepComplete(_ step: RoutineStep, to complete: Bool) {
         let previousCurrent = session.current?.id
         guard session.setComplete(step.id, to: complete) else { return }
-        if complete, session.completedCount == session.steps.count, !rewardAwardedForRun {
-            rewardAwardedForRun = true
-            if let chart = store.awardRoutineCompletion(templateID: templateID) {
+        if complete {
+            let shouldAward = switch rewardFrequency {
+            case .wholeRoutine: session.completedCount == session.steps.count && !rewardAwardedForRun
+            case .eachStep: !session.wasRewarded(step)
+            }
+            if shouldAward, let chart = store.awardRoutineCompletion(templateID: templateID) {
+                if rewardFrequency == .eachStep { session.markRewarded(step) }
+                else { rewardAwardedForRun = true }
                 rewardNotice = chart.isComplete
                     ? "Token added. \(chart.title) is ready to collect in Reward charts."
                     : "Token added to \(chart.title)."
@@ -432,10 +446,12 @@ struct RoutineTemplateBoardView: View {
                     else { store.speak(step.spokenMessage, language: store.settings.communicationLanguage) }
                 } label: {
                     VStack(spacing: 10) {
-                        if let imageData = step.displayImageData, let image = UIImage(data: imageData) {
-                            Image(uiImage: image)
-                                .resizable()
-                                .scaledToFit()
+                        if let imageData = step.displayImageData {
+                            AsyncThumbnailImage(data: imageData, maxPixelSize: expanded ? 600 : 320,
+                                                contentMode: .fit) {
+                                Text(step.symbol)
+                                    .font(.system(size: expanded ? 150 : (useCompact ? 62 : 96)))
+                            }
                                 .frame(maxWidth: .infinity)
                                 .frame(height: expanded ? 250 : (useCompact ? 72 : 145))
                                 .accessibilityHidden(true)

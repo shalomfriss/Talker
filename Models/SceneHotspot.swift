@@ -26,6 +26,7 @@ struct SceneHotspot: Identifiable, Codable, Equatable {
     var showsLabel: Bool? = nil
     var behavior: SceneHotspotBehavior? = nil
     var spokenText: String? = nil
+    var recordedAudioData: Data? = nil
     var videoData: Data? = nil
     var videoPosterData: Data? = nil
 
@@ -33,6 +34,7 @@ struct SceneHotspot: Identifiable, Codable, Equatable {
          destinationSceneID: UUID? = nil, width: Double? = nil, height: Double? = nil,
          backgroundColorHex: String? = nil, showsLabel: Bool? = nil,
          behavior: SceneHotspotBehavior? = nil, spokenText: String? = nil,
+         recordedAudioData: Data? = nil,
          videoData: Data? = nil, videoPosterData: Data? = nil) {
         self.id = id
         self.option = option
@@ -45,6 +47,7 @@ struct SceneHotspot: Identifiable, Codable, Equatable {
         self.showsLabel = showsLabel
         self.behavior = behavior
         self.spokenText = spokenText
+        self.recordedAudioData = recordedAudioData
         self.videoData = videoData
         self.videoPosterData = videoPosterData
     }
@@ -52,10 +55,24 @@ struct SceneHotspot: Identifiable, Codable, Equatable {
     var effectiveBehavior: SceneHotspotBehavior { behavior ?? .speakAndAdd }
 
     var hasValidMedia: Bool {
-        guard let videoData else { return videoPosterData == nil }
-        return !videoData.isEmpty && videoData.count <= SceneVideoProcessing.maxHotspotBytes &&
+        let validRecording = recordedAudioData.map {
+            !$0.isEmpty && $0.count <= 10 * 1_048_576 && destinationSceneID == nil
+        } ?? true
+        guard let videoData else { return videoPosterData == nil && validRecording }
+        return recordedAudioData == nil && !videoData.isEmpty &&
+            videoData.count <= SceneVideoProcessing.maxHotspotBytes &&
             videoPosterData.map { !$0.isEmpty && $0.count <= 2 * 1_048_576 } == true &&
             destinationSceneID == nil
+    }
+
+    func communicationItem(using items: [CommunicationItem]) -> CommunicationItem {
+        var item = option.resolved(using: items).communicationItem
+        if let spokenText {
+            item.message = spokenText
+            item.audioData = nil
+        }
+        if let recordedAudioData { item.audioData = recordedAudioData }
+        return item
     }
 
     var hasValidPosition: Bool {

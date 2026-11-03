@@ -1,10 +1,16 @@
 import Foundation
 
+struct MessagePictureOverride: Codable, Equatable {
+    var imageData: Data
+    var arasaacPictogramID: Int
+}
+
 struct ClearedPictureMessage: Codable, Equatable {
     var parts: [String]
     var languages: [String]
     var bases: [String]
     var itemIDs: [UUID?]? = nil
+    var pictureOverrides: [MessagePictureOverride?]? = nil
 }
 
 struct ConversationDraft: Codable, Identifiable, Equatable {
@@ -14,6 +20,7 @@ struct ConversationDraft: Codable, Identifiable, Equatable {
     var messagePartLanguages: [String] = []
     var messagePartBases: [String]? = nil
     var messagePartItemIDs: [UUID?]? = nil
+    var messagePartPictureOverrides: [MessagePictureOverride?]? = nil
     var clearOnNextSelection: Bool? = nil
     var clearedPictureMessage: ClearedPictureMessage? = nil
     var typedMessage: String = ""
@@ -23,7 +30,9 @@ struct ConversationDraft: Codable, Identifiable, Equatable {
 
     init(id: UUID = UUID(), name: String, messageParts: [String] = [],
          messagePartLanguages: [String] = [], messagePartBases: [String]? = nil,
-         messagePartItemIDs: [UUID?]? = nil, clearOnNextSelection: Bool? = nil,
+         messagePartItemIDs: [UUID?]? = nil,
+         messagePartPictureOverrides: [MessagePictureOverride?]? = nil,
+         clearOnNextSelection: Bool? = nil,
          clearedPictureMessage: ClearedPictureMessage? = nil, typedMessage: String = "",
          typedCursorOffset: Int? = nil,
          pendingPhrasePrefix: String? = nil, updatedAt: Date = .now) {
@@ -33,6 +42,7 @@ struct ConversationDraft: Codable, Identifiable, Equatable {
         self.messagePartLanguages = messagePartLanguages
         self.messagePartBases = messagePartBases
         self.messagePartItemIDs = messagePartItemIDs
+        self.messagePartPictureOverrides = messagePartPictureOverrides
         self.clearOnNextSelection = clearOnNextSelection
         self.clearedPictureMessage = clearedPictureMessage
         self.typedMessage = typedMessage
@@ -49,6 +59,8 @@ struct ConversationDraft: Codable, Identifiable, Equatable {
         messagePartLanguages = try values.decodeIfPresent([String].self, forKey: .messagePartLanguages) ?? []
         messagePartBases = try values.decodeIfPresent([String].self, forKey: .messagePartBases)
         messagePartItemIDs = try values.decodeIfPresent([UUID?].self, forKey: .messagePartItemIDs)
+        messagePartPictureOverrides = try values.decodeIfPresent([MessagePictureOverride?].self,
+                                                                forKey: .messagePartPictureOverrides)
         clearOnNextSelection = try values.decodeIfPresent(Bool.self, forKey: .clearOnNextSelection)
         clearedPictureMessage = try values.decodeIfPresent(ClearedPictureMessage.self, forKey: .clearedPictureMessage)
         typedMessage = try values.decodeIfPresent(String.self, forKey: .typedMessage) ?? ""

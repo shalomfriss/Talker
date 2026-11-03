@@ -40,11 +40,14 @@ struct SensoryCanvasView: View {
                 GeometryReader { geometry in
                     ZStack {
                         Color(uiColor: .secondarySystemBackground)
-                        if moves {
+                        if moves && !ripples.isEmpty {
                             TimelineView(.animation(minimumInterval: 1.0 / 30.0)) { timeline in
                                 Canvas { context, size in
                                     drawRipples(in: context, size: size, now: timeline.date, animated: true)
                                 }
+                            }
+                            .onReceive(cleanupTicker) { date in
+                                ripples.removeAll { date.timeIntervalSince($0.createdAt) >= intensity.duration }
                             }
                         } else {
                             Canvas { context, size in
@@ -104,10 +107,6 @@ struct SensoryCanvasView: View {
         }
         .navigationTitle("Sensory canvas")
         .navigationBarTitleDisplayMode(.inline)
-        .onReceive(cleanupTicker) { date in
-            guard moves else { return }
-            ripples.removeAll { date.timeIntervalSince($0.createdAt) >= intensity.duration }
-        }
         .onChange(of: store.settings.sensoryMotionEnabled) { _, _ in ripples.removeAll() }
         .onChange(of: reduceMotion) { _, _ in ripples.removeAll() }
         .onDisappear { ripples.removeAll() }

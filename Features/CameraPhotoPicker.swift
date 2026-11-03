@@ -30,9 +30,16 @@ struct CameraPhotoPicker: UIViewControllerRepresentable {
 
         func imagePickerController(_ picker: UIImagePickerController,
                                    didFinishPickingMediaWithInfo info: [UIImagePickerController.InfoKey: Any]) {
-            let data = (info[.originalImage] as? UIImage).flatMap(PhotoProcessing.preparedData(from:))
-            parent.onCapture(data)
-            parent.dismiss()
+            guard let image = info[.originalImage] as? UIImage else {
+                parent.onCapture(nil)
+                parent.dismiss()
+                return
+            }
+            Task { @MainActor in
+                let data = await PhotoProcessing.preparedDataAsync(from: image)
+                parent.onCapture(data)
+                parent.dismiss()
+            }
         }
 
         func imagePickerControllerDidCancel(_ picker: UIImagePickerController) {

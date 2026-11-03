@@ -72,10 +72,10 @@ struct RewardChartsView: View {
 
     @ViewBuilder
     private func rewardPicture(_ chart: RewardChart) -> some View {
-        if let data = chart.photoData, let image = UIImage(data: data) {
-            Image(uiImage: image)
-                .resizable()
-                .scaledToFill()
+        if let data = chart.photoData {
+            AsyncThumbnailImage(data: data) {
+                Text(chart.symbol).font(.largeTitle)
+            }
                 .frame(width: 58, height: 58)
                 .clipShape(RoundedRectangle(cornerRadius: 9))
                 .accessibilityHidden(true)

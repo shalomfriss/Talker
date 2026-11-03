@@ -4,6 +4,7 @@ struct VisualMessagePicturePicker: View {
     @EnvironmentObject private var store: CommunicationStore
     @Environment(\.dismiss) private var dismiss
     @State private var search = ""
+    @State private var showingARASAAC = false
 
     let word: String
     let onSelect: (VisualMessagePictureSelection?) -> Void
@@ -27,6 +28,10 @@ struct VisualMessagePicturePicker: View {
                         .accessibilityIdentifier("visual-picture-automatic")
                     Button("Text only", systemImage: "textformat") { choose(.textOnly) }
                         .accessibilityIdentifier("visual-picture-text-only")
+                    Button("Find ARASAAC pictogram", systemImage: "photo.on.rectangle.angled") {
+                        showingARASAAC = true
+                    }
+                    .accessibilityIdentifier("visual-picture-arasaac")
                 }
                 Section("My picture buttons") {
                     if availableItems.isEmpty {
@@ -37,10 +42,11 @@ struct VisualMessagePicturePicker: View {
                                 choose(.item(item.id))
                             } label: {
                                 HStack(spacing: 12) {
-                                    if let data = item.imageData, let image = UIImage(data: data) {
-                                        Image(uiImage: image)
-                                            .resizable()
-                                            .scaledToFit()
+                                    if let data = item.imageData {
+                                        AsyncThumbnailImage(data: data, maxPixelSize: 100,
+                                                            contentMode: .fit) {
+                                            Text(item.symbol).font(.title)
+                                        }
                                             .frame(width: 48, height: 48)
                                             .accessibilityHidden(true)
                                     } else {
@@ -69,11 +75,16 @@ struct VisualMessagePicturePicker: View {
             .navigationTitle("Choose picture")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Done") { dismiss() } } }
+            .sheet(isPresented: $showingARASAAC) {
+                ARASAACPictogramSearchView(initialQuery: word,
+                                          language: store.settings.communicationLanguage) { data, id in
+                    choose(.pictogram(data, id))
+                }
+            }
         }
     }
 
     private func choose(_ selection: VisualMessagePictureSelection?) {
         onSelect(selection)
-        dismiss()
     }
 }

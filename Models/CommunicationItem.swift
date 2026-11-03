@@ -19,6 +19,86 @@ enum ButtonVisibility: String, Codable, CaseIterable {
     }
 }
 
+struct StorySwitchKey: RawRepresentable, Codable, Hashable, CaseIterable, Identifiable {
+    let rawValue: String
+
+    private init(_ rawValue: String) { self.rawValue = rawValue }
+
+    init?(rawValue: String) {
+        if Self.allCases.contains(where: { $0.rawValue == rawValue }) {
+            self.rawValue = rawValue
+            return
+        }
+        guard rawValue.hasPrefix("key-"),
+              let value = UInt32(rawValue.dropFirst(4), radix: 16),
+              let scalar = UnicodeScalar(value),
+              !CharacterSet.controlCharacters.contains(scalar) else { return nil }
+        self.rawValue = rawValue
+    }
+
+    static let space = StorySwitchKey("space")
+    static let returnKey = StorySwitchKey("returnKey")
+    static let rightArrow = StorySwitchKey("rightArrow")
+    static let leftArrow = StorySwitchKey("leftArrow")
+    static let n = StorySwitchKey("n")
+    static let r = StorySwitchKey("r")
+    static let allCases: [StorySwitchKey] = [.space, .returnKey, .rightArrow, .leftArrow, .n, .r]
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch rawValue {
+        case Self.space.rawValue: return "Space"
+        case Self.returnKey.rawValue: return "Return"
+        case Self.rightArrow.rawValue: return "Right Arrow"
+        case Self.leftArrow.rawValue: return "Left Arrow"
+        case Self.n.rawValue: return "N"
+        case Self.r.rawValue: return "R"
+        default:
+            guard let value = UInt32(rawValue.dropFirst(4), radix: 16),
+                  let scalar = UnicodeScalar(value) else { return "Unknown key" }
+            if (0xF704...0xF70F).contains(value) { return "F\(value - 0xF704 + 1)" }
+            if CharacterSet.whitespacesAndNewlines.contains(scalar) {
+                return "Key U+\(String(value, radix: 16).uppercased())"
+            }
+            return String(scalar).uppercased()
+        }
+    }
+
+    var customCharacter: Character? {
+        guard rawValue.hasPrefix("key-"),
+              let value = UInt32(rawValue.dropFirst(4), radix: 16),
+              let scalar = UnicodeScalar(value) else { return nil }
+        return Character(String(scalar))
+    }
+
+    static func captured(_ character: Character) -> StorySwitchKey? {
+        let scalars = String(character).unicodeScalars
+        guard scalars.count == 1, let scalar = scalars.first,
+              !CharacterSet.controlCharacters.contains(scalar),
+              !CharacterSet.whitespacesAndNewlines.contains(scalar) else { return nil }
+        return StorySwitchKey(rawValue: "key-\(String(scalar.value, radix: 16))")
+    }
+
+    static func alternative(to key: StorySwitchKey) -> StorySwitchKey {
+        key == .space ? .returnKey : .space
+    }
+
+    init(from decoder: Decoder) throws {
+        let raw = try decoder.singleValueContainer().decode(String.self)
+        guard let key = StorySwitchKey(rawValue: raw) else {
+            throw DecodingError.dataCorrupted(.init(codingPath: decoder.codingPath,
+                                                   debugDescription: "Invalid story switch key"))
+        }
+        self = key
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var value = encoder.singleValueContainer()
+        try value.encode(rawValue)
+    }
+}
+
 struct CommunicationItem: Identifiable, Codable, Equatable {
     var id: UUID = UUID()
     var label: String
@@ -42,6 +122,16 @@ struct CommunicationItem: Identifiable, Codable, Equatable {
     var backgroundColorHex: String? = nil
     var borderColorHex: String? = nil
     var grammarCategory: GrammarCategory? = nil
+    var labelFontSize: Int? = nil
+    var contentPadding: Int? = nil
+
+    static func normalizedLabelFontSize(_ value: Int?) -> Int? {
+        value.map { min(max($0, 12), 30) }
+    }
+
+    static func normalizedContentPadding(_ value: Int?) -> Int? {
+        value.map { min(max($0, 0), 16) }
+    }
 
     var boardVisibility: ButtonVisibility { visibility ?? .shown }
 
@@ -173,6 +263,7 @@ struct ButtonColorValue: Equatable {
 enum ButtonAction: String, Codable, CaseIterable, Hashable {
     case addToMessage
     case speakImmediately
+    case speakCurrentTime
     case speakMessage
     case clearMessage
     case undoClearMessage
@@ -212,6 +303,7 @@ enum ButtonAction: String, Codable, CaseIterable, Hashable {
         switch self {
         case .addToMessage: "Add to message"
         case .speakImmediately: "Speak immediately"
+        case .speakCurrentTime: "Speak the current time"
         case .speakMessage: "Speak picture message"
         case .clearMessage: "Clear picture message"
         case .undoClearMessage: "Undo clear message"
@@ -240,6 +332,7 @@ enum ButtonAction: String, Codable, CaseIterable, Hashable {
         switch self {
         case .addToMessage: "💬"
         case .speakImmediately: "🔊"
+        case .speakCurrentTime: "🕒"
         case .speakMessage: "🗣️"
         case .clearMessage: "🧹"
         case .undoClearMessage: "↩️"
@@ -269,6 +362,33 @@ enum ButtonAction: String, Codable, CaseIterable, Hashable {
         case .visitBoard: .visit
         default: nil
         }
+    }
+}
+
+enum SpokenClock {
+    static func locale(for language: String) -> Locale {
+        Locale(identifier: language == "es" ? "es_ES" : "en_US")
+    }
+
+    static func time(at date: Date, language: String, timeZone: TimeZone = .current) -> String {
+        let formatter = DateFormatter()
+        formatter.locale = locale(for: language)
+        formatter.timeZone = timeZone
+        formatter.timeStyle = .short
+        return formatter.string(from: date)
+    }
+
+    static func date(at date: Date, language: String, timeZone: TimeZone = .current) -> String {
+        let formatter = DateFormatter()
+        formatter.locale = locale(for: language)
+        formatter.timeZone = timeZone
+        formatter.dateStyle = .full
+        return formatter.string(from: date)
+    }
+
+    static func message(at date: Date, language: String, timeZone: TimeZone = .current) -> String {
+        let time = time(at: date, language: language, timeZone: timeZone)
+        return language == "es" ? "La hora es \(time)." : "The time is \(time)."
     }
 }
 
@@ -369,10 +489,43 @@ struct SavedPhrase: Identifiable, Codable, Equatable {
     }
 }
 
+enum SpokenMessageSpeaker: String, Codable, Equatable {
+    case communicator
+    case partner
+
+    var title: String { self == .partner ? "Partner" : "Communicator" }
+}
+
+enum SpokenMessageInputMode: String, Codable, Equatable {
+    case picture
+    case typed
+    case savedPhrase
+    case quickMessage
+    case cue
+    case writing
+    case manualNote
+    case other
+
+    var title: String {
+        switch self {
+        case .picture: "Picture board"
+        case .typed: "Typed"
+        case .savedPhrase: "Saved phrase"
+        case .quickMessage: "Quick message"
+        case .cue: "Letter or topic cue"
+        case .writing: "Reviewed writing"
+        case .manualNote: "Manually entered"
+        case .other: "Other AAC speech"
+        }
+    }
+}
+
 struct SpokenMessage: Identifiable, Codable, Equatable {
     var id: UUID = UUID()
     var text: String
     var date: Date = Date()
+    var speaker: SpokenMessageSpeaker? = nil
+    var inputMode: SpokenMessageInputMode? = nil
 }
 
 enum TileSize: Int, CaseIterable, Codable {
@@ -432,6 +585,31 @@ struct BoardGridLayout: Codable, Equatable {
 
 enum BoardSlotLayout {
     static let maximumEditablePosition = 10_000
+
+    static func slotCount(itemCount: Int, emptyPositions: Set<Int>, minimumCount: Int = 0) -> Int {
+        let empties = emptyPositions.filter { (0..<maximumEditablePosition).contains($0) }
+        return max(minimumCount, itemCount + empties.count, (empties.max() ?? -1) + 1)
+    }
+
+    static func pageSlots(for items: [CommunicationItem], emptyPositions: Set<Int>,
+                          layout: BoardGridLayout, page: Int) -> [CommunicationItem?] {
+        let empties = Set(emptyPositions.filter { (0..<maximumEditablePosition).contains($0) })
+        let count = max(items.count + empties.count, (empties.max() ?? -1) + 1)
+        let range = layout.range(for: page, itemCount: count)
+        var itemIndex = range.lowerBound - empties.filter { $0 < range.lowerBound }.count
+        var result: [CommunicationItem?] = []
+        result.reserveCapacity(layout.pageCapacity)
+        for position in range {
+            if empties.contains(position) || itemIndex >= items.count {
+                result.append(nil)
+            } else {
+                result.append(items[itemIndex])
+                itemIndex += 1
+            }
+        }
+        result.append(contentsOf: repeatElement(nil, count: layout.pageCapacity - result.count))
+        return result
+    }
 
     static func slots(for items: [CommunicationItem], emptyPositions: Set<Int>,
                       minimumCount: Int = 0) -> [CommunicationItem?] {
@@ -602,6 +780,7 @@ struct TimeOfDayWordUse: Codable, Equatable {
 
 struct AppSettings: Codable {
     var speechRate: Float = 0.48
+    var speechPitch: Float = 1.0
     var speechVolume: Float = 1.0
     var speechMuted: Bool = false
     var voiceIdentifier: String = ""
@@ -623,6 +802,7 @@ struct AppSettings: Codable {
     var pinnedBoards: [String] = []
     var boardFolders: [String] = []
     var boardFolderAssignments: [String: String] = [:]
+    var boardFolderVoiceIdentifiers: [String: String] = [:]
     var boardIcons: [String: String] = [:]
     var hiddenBoards: [String] = []
     var boardsWithoutTileLabels: [String] = []
@@ -640,6 +820,7 @@ struct AppSettings: Codable {
     var progressiveVocabularyStage: VocabularyStage = .off
     var grammarColorScheme: GrammarColorScheme = .board
     var saveHistory: Bool = false
+    var recordCommunicationUse: Bool = false
     var historyPaused: Bool = false
     var learnPrediction: Bool = false
     var saveFeelingsLog: Bool = false
@@ -672,6 +853,8 @@ struct AppSettings: Codable {
     var twoBoardsEnabled: Bool = false
     var storyOneTapReading: Bool = false
     var storyTwoSwitchReading: Bool = false
+    var storyReadKey: StorySwitchKey = .returnKey
+    var storyAdvanceKey: StorySwitchKey = .space
     var storySlideshowPause: Double = 1.0
     var attentionMessageEnglish: String = ""
     var attentionMessageSpanish: String = ""
@@ -706,6 +889,18 @@ struct AppSettings: Codable {
     mutating func selectTenKeyKeyboard(_ enabled: Bool) {
         tenKeyKeyboardEnabled = enabled
         if enabled { groupedKeyboardKeys = false }
+    }
+
+    mutating func selectStoryReadKey(_ key: StorySwitchKey) {
+        let previous = storyReadKey
+        storyReadKey = key
+        if storyAdvanceKey == key { storyAdvanceKey = previous }
+    }
+
+    mutating func selectStoryAdvanceKey(_ key: StorySwitchKey) {
+        let previous = storyAdvanceKey
+        storyAdvanceKey = key
+        if storyReadKey == key { storyReadKey = previous }
     }
 
     func wordsForKeyboard(language: String) -> [WordKeyboardKey] {
@@ -758,6 +953,7 @@ struct AppSettings: Codable {
     init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
         speechRate = try values.decodeIfPresent(Float.self, forKey: .speechRate) ?? 0.48
+        speechPitch = min(2, max(0.5, try values.decodeIfPresent(Float.self, forKey: .speechPitch) ?? 1))
         speechVolume = min(1, max(0.1, try values.decodeIfPresent(Float.self, forKey: .speechVolume) ?? 1))
         speechMuted = try values.decodeIfPresent(Bool.self, forKey: .speechMuted) ?? false
         voiceIdentifier = try values.decodeIfPresent(String.self, forKey: .voiceIdentifier) ?? ""
@@ -798,6 +994,15 @@ struct AppSettings: Codable {
                 let key = entry.value.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
                 if !entry.key.isEmpty, let folder = folderNames[key] { result[entry.key] = folder }
             }
+        boardFolderVoiceIdentifiers = ((try? values.decode([String: String].self,
+                                                        forKey: .boardFolderVoiceIdentifiers)) ?? [:])
+            .reduce(into: [String: String]()) { result, entry in
+                let key = entry.key.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
+                let identifier = entry.value.trimmingCharacters(in: .whitespacesAndNewlines)
+                if let folder = folderNames[key], !identifier.isEmpty, identifier.count <= 256 {
+                    result[folder] = identifier
+                }
+            }
         boardIcons = ((try? values.decode([String: String].self, forKey: .boardIcons)) ?? [:])
             .filter { !$0.key.isEmpty && !$0.value.isEmpty && $0.value.count <= 4 }
         var seenHiddenBoards = Set<String>()
@@ -825,6 +1030,7 @@ struct AppSettings: Codable {
         progressiveVocabularyStage = (try? values.decode(VocabularyStage.self, forKey: .progressiveVocabularyStage)) ?? .off
         grammarColorScheme = (try? values.decode(GrammarColorScheme.self, forKey: .grammarColorScheme)) ?? .board
         saveHistory = try values.decodeIfPresent(Bool.self, forKey: .saveHistory) ?? false
+        recordCommunicationUse = try values.decodeIfPresent(Bool.self, forKey: .recordCommunicationUse) ?? false
         historyPaused = try values.decodeIfPresent(Bool.self, forKey: .historyPaused) ?? false
         learnPrediction = try values.decodeIfPresent(Bool.self, forKey: .learnPrediction) ?? false
         saveFeelingsLog = try values.decodeIfPresent(Bool.self, forKey: .saveFeelingsLog) ?? false
@@ -877,6 +1083,11 @@ struct AppSettings: Codable {
         storyOneTapReading = try values.decodeIfPresent(Bool.self, forKey: .storyOneTapReading) ?? false
         storyTwoSwitchReading = try values.decodeIfPresent(Bool.self, forKey: .storyTwoSwitchReading) ?? false
         if storyTwoSwitchReading { storyOneTapReading = false }
+        storyReadKey = (try? values.decode(StorySwitchKey.self, forKey: .storyReadKey)) ?? .returnKey
+        storyAdvanceKey = (try? values.decode(StorySwitchKey.self, forKey: .storyAdvanceKey)) ?? .space
+        if storyReadKey == storyAdvanceKey {
+            storyAdvanceKey = StorySwitchKey.alternative(to: storyReadKey)
+        }
         let slideshowPause = try values.decodeIfPresent(Double.self, forKey: .storySlideshowPause) ?? 1.0
         storySlideshowPause = slideshowPause.isFinite ? min(5, max(0, slideshowPause)) : 1.0
         attentionMessageEnglish = try values.decodeIfPresent(String.self, forKey: .attentionMessageEnglish) ?? ""
@@ -895,6 +1106,80 @@ struct AppSettings: Codable {
     }
 }
 
+struct PersonalPicture: Identifiable, Codable, Equatable, Sendable {
+    var id: UUID = UUID()
+    var title: String
+    var imageData: Data
+}
+
+struct CommunicationUsageEvent: Identifiable, Codable, Equatable {
+    enum Kind: String, Codable {
+        case pictureButton
+        case savedPhrase
+        case picturePhrase
+
+        var title: String {
+            switch self {
+            case .pictureButton: "Picture button"
+            case .savedPhrase: "Saved phrase"
+            case .picturePhrase: "Picture phrase"
+            }
+        }
+    }
+
+    static let maximumCount = 1_000
+
+    var id: UUID = UUID()
+    var date: Date = .now
+    var kind: Kind
+    var label: String
+    var board: String?
+    var itemID: UUID?
+
+    init(kind: Kind, label: String, board: String? = nil, itemID: UUID? = nil) {
+        self.kind = kind
+        self.label = String(label.trimmingCharacters(in: .whitespacesAndNewlines).prefix(80))
+        self.board = board.map { String($0.trimmingCharacters(in: .whitespacesAndNewlines).prefix(80)) }
+        self.itemID = itemID
+    }
+
+    static func cleaned(_ events: [Self]) -> [Self] {
+        var result: [Self] = []
+        result.reserveCapacity(min(events.count, maximumCount))
+        var seenIDs = Set<UUID>()
+        for source in events {
+            var event = source
+            event.label = String(source.label.trimmingCharacters(in: .whitespacesAndNewlines).prefix(80))
+            guard !event.label.isEmpty else { continue }
+            event.board = source.board.map {
+                String($0.trimmingCharacters(in: .whitespacesAndNewlines).prefix(80))
+            }
+            if !seenIDs.insert(event.id).inserted {
+                repeat { event.id = UUID() } while !seenIDs.insert(event.id).inserted
+            }
+            result.append(event)
+            if result.count == maximumCount { break }
+        }
+        return result
+    }
+
+    static func csv(_ events: [Self]) -> String {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime]
+        func field(_ value: String) -> String {
+            let clean = value.replacingOccurrences(of: "\r", with: " ")
+                .replacingOccurrences(of: "\n", with: " ")
+            let safe = clean.first.map { "=+-@\t".contains($0) } == true ? "'" + clean : clean
+            return "\"" + safe.replacingOccurrences(of: "\"", with: "\"\"") + "\""
+        }
+        let rows = events.map { event in
+            [field(formatter.string(from: event.date)), field(event.kind.title),
+             field(event.label), field(event.board ?? "")].joined(separator: ",")
+        }
+        return (["Timestamp (UTC),Kind,Label,Board"] + rows).joined(separator: "\r\n") + "\r\n"
+    }
+}
+
 struct StoredData: Codable {
     var items: [CommunicationItem]
     var categories: [String]
@@ -905,7 +1190,9 @@ struct StoredData: Codable {
     var phrases: [SavedPhrase]
     var jokes: [Joke]
     var history: [SpokenMessage]
+    var usageEvents: [CommunicationUsageEvent]
     var notes: [CommunicationNote]
+    var lifeNotebookPosts: [LifeNotebookPost]
     var savedReadingDocuments: [SavedReadingDocument]
     var learnedPrediction: LearnedPredictionModel
     var feelingsLog: [FeelingLogEntry]
@@ -925,13 +1212,15 @@ struct StoredData: Codable {
     var speechTopics: [SpeechTopic]
     var nearbyMessages: [NearbyChatMessage]
     var nearbyChatSavingEnabled: Bool
+    var pictureLibrary: [PersonalPicture]
 
     init(items: [CommunicationItem], categories: [String]? = nil,
          routines: [RoutineStep], routineHistory: [RoutineRun] = [],
          routineTemplates: [RoutineTemplate] = [],
          routineReminders: [RoutineReminder] = [],
          phrases: [SavedPhrase], jokes: [Joke] = [],
-         history: [SpokenMessage] = [], notes: [CommunicationNote] = [],
+         history: [SpokenMessage] = [], usageEvents: [CommunicationUsageEvent] = [],
+         notes: [CommunicationNote] = [], lifeNotebookPosts: [LifeNotebookPost] = [],
          savedReadingDocuments: [SavedReadingDocument] = [],
          learnedPrediction: LearnedPredictionModel = .init(),
          feelingsLog: [FeelingLogEntry] = [],
@@ -945,7 +1234,8 @@ struct StoredData: Codable {
          wordTranslations: [String: [String: WordTranslation]]? = nil,
          conversations: [ConversationDraft]? = nil, activeConversationID: UUID? = nil,
          drawingStrokes: [DrawingStroke] = [], speechTopics: [SpeechTopic] = SpeechTopic.starter,
-         nearbyMessages: [NearbyChatMessage] = [], nearbyChatSavingEnabled: Bool = false) {
+         nearbyMessages: [NearbyChatMessage] = [], nearbyChatSavingEnabled: Bool = false,
+         pictureLibrary: [PersonalPicture] = []) {
         self.items = items
         self.categories = Self.mergedCategories(categories, items: items)
         self.routines = routines
@@ -955,7 +1245,9 @@ struct StoredData: Codable {
         self.phrases = phrases
         self.jokes = jokes
         self.history = history
+        self.usageEvents = CommunicationUsageEvent.cleaned(usageEvents)
         self.notes = notes
+        self.lifeNotebookPosts = lifeNotebookPosts
         self.savedReadingDocuments = SavedReadingDocument.cleaned(savedReadingDocuments)
         self.learnedPrediction = learnedPrediction
         self.feelingsLog = feelingsLog
@@ -981,6 +1273,7 @@ struct StoredData: Codable {
         self.speechTopics = speechTopics
         self.nearbyMessages = nearbyMessages
         self.nearbyChatSavingEnabled = nearbyChatSavingEnabled
+        self.pictureLibrary = pictureLibrary
     }
 
     init(from decoder: Decoder) throws {
@@ -994,7 +1287,11 @@ struct StoredData: Codable {
         phrases = try values.decode([SavedPhrase].self, forKey: .phrases)
         jokes = try values.decodeIfPresent([Joke].self, forKey: .jokes) ?? []
         history = try values.decodeIfPresent([SpokenMessage].self, forKey: .history) ?? []
+        usageEvents = CommunicationUsageEvent.cleaned(
+            try values.decodeIfPresent([CommunicationUsageEvent].self, forKey: .usageEvents) ?? [])
         notes = try values.decodeIfPresent([CommunicationNote].self, forKey: .notes) ?? []
+        lifeNotebookPosts = try values.decodeIfPresent([LifeNotebookPost].self,
+                                                      forKey: .lifeNotebookPosts) ?? []
         savedReadingDocuments = SavedReadingDocument.cleaned(
             try values.decodeIfPresent([SavedReadingDocument].self, forKey: .savedReadingDocuments) ?? [])
         learnedPrediction = try values.decodeIfPresent(LearnedPredictionModel.self, forKey: .learnedPrediction) ?? .init()
@@ -1026,20 +1323,27 @@ struct StoredData: Codable {
         speechTopics = try values.decodeIfPresent([SpeechTopic].self, forKey: .speechTopics) ?? SpeechTopic.starter
         nearbyMessages = try values.decodeIfPresent([NearbyChatMessage].self, forKey: .nearbyMessages) ?? []
         nearbyChatSavingEnabled = try values.decodeIfPresent(Bool.self, forKey: .nearbyChatSavingEnabled) ?? false
+        pictureLibrary = try values.decodeIfPresent([PersonalPicture].self, forKey: .pictureLibrary) ?? []
     }
 
     private static func mergedCategories(_ stored: [String]?, items: [CommunicationItem]) -> [String] {
         var result: [String] = []
-        for raw in (stored ?? StarterVocabulary.categories) + StarterVocabulary.categories
-            + items.map(\.category) + items.compactMap(\.destinationBoard) {
+        var seen = Set<String>()
+        let starterNames = Dictionary(uniqueKeysWithValues: StarterVocabulary.categories.map {
+            ($0.folding(options: .caseInsensitive, locale: .current), $0)
+        })
+        let favoritesKey = "Favorites".folding(options: .caseInsensitive, locale: .current)
+        func append(_ raw: String) {
             let clean = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-            let name = StarterVocabulary.categories.first {
-                $0.localizedCaseInsensitiveCompare(clean) == .orderedSame
-            } ?? clean
-            guard !name.isEmpty, name.localizedCaseInsensitiveCompare("Favorites") != .orderedSame,
-                  !result.contains(where: { $0.localizedCaseInsensitiveCompare(name) == .orderedSame }) else { continue }
+            let key = clean.folding(options: .caseInsensitive, locale: .current)
+            let name = starterNames[key] ?? clean
+            guard !name.isEmpty, key != favoritesKey, seen.insert(key).inserted else { return }
             result.append(name)
         }
+        for name in stored ?? StarterVocabulary.categories { append(name) }
+        for name in StarterVocabulary.categories { append(name) }
+        for item in items { append(item.category) }
+        for item in items { if let destination = item.destinationBoard { append(destination) } }
         return result
     }
 }

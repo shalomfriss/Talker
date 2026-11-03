@@ -131,7 +131,7 @@ struct SpeechCueBoardView: View {
                 .disabled(currentCue.isEmpty)
                 .accessibilityIdentifier("speech-cue-show-partner")
                 Button("Speak cue", systemImage: "speaker.wave.2.fill") {
-                    store.speak(currentCue, saveToHistory: true)
+                    store.speak(currentCue, saveToHistory: true, inputMode: .cue)
                 }
                 .disabled(currentCue.isEmpty)
             }

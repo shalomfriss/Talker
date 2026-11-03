@@ -47,7 +47,7 @@ struct PhraseTemplateFillView: View {
                     Button("Speak completed phrase", systemImage: "speaker.wave.2.fill") {
                         guard let completedText else { return }
                         store.speak(completedText, saveToHistory: true,
-                                    languageCode: phrase.languageCode)
+                                    languageCode: phrase.languageCode, inputMode: .savedPhrase)
                         store.recordRecentPhrase(phrase)
                     }
                     .disabled(completedText == nil)

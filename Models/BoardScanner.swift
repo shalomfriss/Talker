@@ -40,6 +40,21 @@ enum ScanTarget: Hashable {
     case undo
     case clear
 
+    func highlightsWord(id: UUID, position: Int, columns: Int) -> Bool {
+        switch self {
+        case .word(let targetID, _): targetID == id
+        default: highlightsLine(position: position, columns: columns)
+        }
+    }
+
+    func highlightsLine(position: Int, columns: Int) -> Bool {
+        switch self {
+        case .line(.row, let index): position / max(1, columns) == index
+        case .line(.column, let index): position % max(1, columns) == index
+        default: false
+        }
+    }
+
     var label: String {
         switch self {
         case .chooseBoards: "Choose board"
@@ -120,12 +135,12 @@ struct BoardScanner {
                  dimmedButtonsActive: Bool = true) -> [ScanTarget] {
         let columnCount = max(1, columns)
         let axis: ScanAxis = pattern == .columnRow ? .column : .row
-        let boardSlots = BoardSlotLayout.slots(for: boardItems, emptyPositions: emptyPositions)
-        let availablePositions = boardSlots.enumerated().compactMap { position, item in
-            item?.isBoardSelectable(dimmedButtonsActive: dimmedButtonsActive) == true ? position : nil
-        }
         switch group {
         case .words:
+            let boardSlots = BoardSlotLayout.slots(for: boardItems, emptyPositions: emptyPositions)
+            let availablePositions = boardSlots.enumerated().compactMap { position, item in
+                item?.isBoardSelectable(dimmedButtonsActive: dimmedButtonsActive) == true ? position : nil
+            }
             let controls: [ScanTarget] = [.chooseBoards, .messageControls]
                 + (hasPreviousPage ? [.previousPage] : [])
                 + (hasNextPage ? [.nextPage] : [])
@@ -142,6 +157,7 @@ struct BoardScanner {
             }).sorted()
             return controls + lines.map { .line(axis, $0) }
         case .line:
+            let boardSlots = BoardSlotLayout.slots(for: boardItems, emptyPositions: emptyPositions)
             return [.returnToLines] + boardSlots.enumerated().compactMap { offset, item in
                 let line = axis == .row ? offset / columnCount : offset % columnCount
                 guard line == selectedLine, let item,

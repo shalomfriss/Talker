@@ -1,9 +1,44 @@
 import SwiftUI
 
-struct PendingBackupImport: Identifiable {
+struct BackupPreviewSummary: Sendable {
+    let categories: [String]
+    let buttonCount: Int
+    let buttonCountsByCategory: [String: Int]
+
+    init(_ backup: StoredData) {
+        categories = backup.categories
+        buttonCount = backup.items.count
+        var counts: [String: Int] = [:]
+        for item in backup.items { counts[item.category, default: 0] += 1 }
+        buttonCountsByCategory = counts
+    }
+}
+
+struct PendingBackupImport: Identifiable, Sendable {
     let id = UUID()
     let data: Data
-    let preview: StoredData
+    let preview: BackupPreviewSummary
+
+    static func load(from url: URL) async throws -> PendingBackupImport {
+        try await Task.detached(priority: .userInitiated) { @Sendable in
+            let access = url.startAccessingSecurityScopedResource()
+            defer { if access { url.stopAccessingSecurityScopedResource() } }
+            let data = try Data(contentsOf: url, options: .mappedIfSafe)
+            return try prepared(data: data)
+        }.value
+    }
+
+    static func prepare(data: Data) async throws -> PendingBackupImport {
+        try await Task.detached(priority: .userInitiated) { @Sendable in
+            try prepared(data: data)
+        }.value
+    }
+
+    private static func prepared(data: Data) throws -> PendingBackupImport {
+        let decoded = try JSONDecoder().decode(StoredData.self, from: data)
+        guard !decoded.items.isEmpty else { throw BackupError.emptyVocabulary }
+        return PendingBackupImport(data: data, preview: BackupPreviewSummary(decoded))
+    }
 }
 
 struct BackupImportView: View {
@@ -20,7 +55,7 @@ struct BackupImportView: View {
         NavigationStack {
             List {
                 Section {
-                    Text("This backup has \(backup.preview.categories.count) boards and \(backup.preview.items.count) buttons.")
+                    Text("This backup has \(backup.preview.categories.count) boards and \(backup.preview.buttonCount) buttons.")
                     Text("Choose boards to add as copies while keeping this profile’s other data.")
                         .foregroundStyle(.secondary)
                 }
@@ -36,7 +71,7 @@ struct BackupImportView: View {
                             HStack {
                                 Text(name)
                                 Spacer()
-                                Text("\(backup.preview.items.filter { $0.category == name }.count) buttons")
+                                Text("\(backup.preview.buttonCountsByCategory[name, default: 0]) buttons")
                                     .foregroundStyle(.secondary)
                             }
                         }

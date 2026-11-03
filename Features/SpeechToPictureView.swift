@@ -1,6 +1,12 @@
 import SwiftUI
 
 struct SpeechToPictureView: View {
+    private struct PictureChoice: Identifiable {
+        let index: Int
+        let word: String
+        var id: Int { index }
+    }
+
     @EnvironmentObject private var store: CommunicationStore
     @Environment(\.dismiss) private var dismiss
     @Environment(\.scenePhase) private var scenePhase
@@ -13,23 +19,30 @@ struct SpeechToPictureView: View {
     @State private var feedback: String?
     @State private var recordingAttemptID = UUID()
     @State private var pictureSelections: [Int: VisualMessagePictureSelection] = [:]
-    @State private var selectingPartIndex = 0
-    @State private var selectingPartText = ""
-    @State private var showingPictureChoices = false
+    @State private var pictureChoice: PictureChoice?
+    @FocusState private var transcriptFocused: Bool
 
     private var parts: [VisualMessagePart] {
         store.visualMessageParts(for: transcript, pictureSelections: pictureSelections)
     }
 
-    private func pictureDescription(for part: VisualMessagePart) -> String {
-        guard let id = part.itemID, let item = store.items.first(where: { $0.id == id }) else {
-            return "Text only"
+    private func pictureDescription(for part: VisualMessagePart,
+                                    labelsByID: [UUID: String]) -> String {
+        guard let id = part.itemID, let label = labelsByID[id] else {
+            return part.arasaacPictogramID == nil ? "Text only" : "ARASAAC pictogram"
         }
-        return "Picture from \(store.displayLabel(for: item))"
+        return "Picture from \(label)"
     }
 
     var body: some View {
-        NavigationStack {
+        let previewParts = parts
+        let previewIDs = Set(previewParts.compactMap(\.itemID))
+        let labelsByID = store.items.reduce(into: [UUID: String]()) { labels, item in
+            if previewIDs.contains(item.id) && labels[item.id] == nil {
+                labels[item.id] = store.displayLabel(for: item)
+            }
+        }
+        return NavigationStack {
             Form {
                 Section("Speak or type") {
                     Text("Say a message, then check the words. Recognition stays on this device, and the recording is deleted after transcription. You can also type the words.")
@@ -51,6 +64,7 @@ struct SpeechToPictureView: View {
                     }
                     TextField("Review spoken words", text: $transcript, axis: .vertical)
                         .lineLimit(2...6)
+                        .focused($transcriptFocused)
                         .accessibilityIdentifier("visual-message-transcript")
                     if let feedback = feedback ?? recorder.errorMessage {
                         Text(feedback)
@@ -60,26 +74,25 @@ struct SpeechToPictureView: View {
                 }
 
                 Section("Picture preview") {
-                    if parts.isEmpty {
+                    if previewParts.isEmpty {
                         Text("Your words will appear here as picture and text cards.")
                             .foregroundStyle(.secondary)
                     } else {
-                        Text("Matching words use your existing picture buttons. Other words stay as text.")
+                        Text("Matching words use your existing picture buttons. Other words stay as text. Choose a card to change its picture or find an ARASAAC pictogram.")
                             .font(.footnote)
                             .foregroundStyle(.secondary)
                         LazyVGrid(columns: [GridItem(.adaptive(minimum: 100), spacing: 10)], spacing: 10) {
-                            ForEach(Array(parts.enumerated()), id: \.offset) { index, part in
+                            ForEach(Array(previewParts.enumerated()), id: \.offset) { index, part in
                                 Button {
-                                    selectingPartIndex = index
-                                    selectingPartText = part.text
-                                    showingPictureChoices = true
+                                    transcriptFocused = false
+                                    pictureChoice = PictureChoice(index: index, word: part.text)
                                 } label: {
                                 VStack(spacing: 5) {
-                                    if let imageData = part.imageData,
-                                       let image = UIImage(data: imageData) {
-                                        Image(uiImage: image)
-                                            .resizable()
-                                            .scaledToFit()
+                                    if let imageData = part.imageData {
+                                        AsyncThumbnailImage(data: imageData, maxPixelSize: 120,
+                                                            contentMode: .fit) {
+                                            Image(systemName: "textformat").font(.title)
+                                        }
                                             .frame(height: 58)
                                             .accessibilityHidden(true)
                                     } else if let symbol = part.symbol, !symbol.isEmpty {
@@ -107,7 +120,7 @@ struct SpeechToPictureView: View {
                                 }
                                 .buttonStyle(.plain)
                                 .accessibilityLabel("Change picture for \(part.text)")
-                                .accessibilityValue(pictureDescription(for: part))
+                                .accessibilityValue(pictureDescription(for: part, labelsByID: labelsByID))
                                 .accessibilityIdentifier("visual-message-part-\(index)")
                             }
                         }
@@ -117,12 +130,9 @@ struct SpeechToPictureView: View {
 
                 Section {
                     Button("Add to picture message", systemImage: "plus.circle.fill") {
-                        if store.appendVisualMessage(transcript, pictureSelections: pictureSelections) {
-                            isTyping = false
-                            dismiss()
-                        }
+                        addReviewedMessage()
                     }
-                    .disabled(parts.isEmpty || recorder.isRecording || isPreparingRecording || isTranscribing)
+                    .disabled(previewParts.isEmpty || recorder.isRecording || isPreparingRecording || isTranscribing)
                     .accessibilityIdentifier("visual-message-add")
                 }
             }
@@ -130,26 +140,47 @@ struct SpeechToPictureView: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) { Button("Done") { dismiss() } }
+                ToolbarItemGroup(placement: .keyboard) {
+                    Spacer()
+                    Button(previewParts.count == 1 ? "Choose picture" : "Choose first picture") {
+                        guard let first = previewParts.first else { return }
+                        transcriptFocused = false
+                        Task { @MainActor in
+                            try? await Task.sleep(for: .milliseconds(200))
+                            pictureChoice = PictureChoice(index: 0, word: first.text)
+                        }
+                    }
+                    .disabled(previewParts.isEmpty)
+                    .accessibilityIdentifier("visual-message-choose-first-picture")
+                }
             }
-            .sheet(isPresented: $showingPictureChoices) {
-                VisualMessagePicturePicker(word: selectingPartText) { selection in
-                    if let selection { pictureSelections[selectingPartIndex] = selection }
-                    else { pictureSelections.removeValue(forKey: selectingPartIndex) }
+            .sheet(item: $pictureChoice) { choice in
+                VisualMessagePicturePicker(word: choice.word) { selection in
+                    if let selection { pictureSelections[choice.index] = selection }
+                    else { pictureSelections.removeValue(forKey: choice.index) }
+                    pictureChoice = nil
                 }
             }
             .onChange(of: transcript) { _, _ in
                 pictureSelections.removeAll()
-                showingPictureChoices = false
+                pictureChoice = nil
             }
             .onChange(of: store.activeProfileID) { _, _ in
                 pictureSelections.removeAll()
-                showingPictureChoices = false
+                pictureChoice = nil
             }
             .onDisappear { discardPendingSpeech() }
             .onChange(of: scenePhase) { _, phase in
                 if phase == .background { discardPendingSpeech() }
             }
         }
+    }
+
+    private func addReviewedMessage() {
+        guard !recorder.isRecording && !isPreparingRecording && !isTranscribing,
+              store.appendVisualMessage(transcript, pictureSelections: pictureSelections) else { return }
+        isTyping = false
+        dismiss()
     }
 
     private func startRecording() {

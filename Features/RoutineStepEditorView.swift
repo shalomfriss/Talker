@@ -10,6 +10,7 @@ struct RoutineStepEditorView: View {
 
     let step: RoutineStep?
     @State private var title: String
+    @State private var pastingPhoto = false
     @State private var symbol: String
     @State private var spokenText: String
     @State private var durationSeconds: Int
@@ -59,7 +60,18 @@ struct RoutineStepEditorView: View {
                         PhotosPicker(selection: $selectedPhoto, matching: .images) {
                             Label("Choose a photo", systemImage: "photo")
                         }
+                        PictureLibraryPickerButton(title: "Picture library",
+                                                   identifier: "routine-step-picture-library") { picture in
+                            imageData = picture.imageData
+                            videoData = nil
+                            videoPosterData = nil
+                        }
                         CameraPhotoButton {
+                            imageData = $0
+                            videoData = nil
+                            videoPosterData = nil
+                        }
+                        PastePhotoButton(identifier: "routine-step-paste-photo", onPastingChange: { pastingPhoto = $0 }) {
                             imageData = $0
                             videoData = nil
                             videoPosterData = nil
@@ -67,10 +79,10 @@ struct RoutineStepEditorView: View {
                         Button("Choose photo from Files", systemImage: "folder") {
                             showingImageImporter = true
                         }
-                        if let imageData, let image = UIImage(data: imageData) {
-                            Image(uiImage: image)
-                                .resizable()
-                                .scaledToFit()
+                        if let imageData {
+                            AsyncThumbnailImage(data: imageData, maxPixelSize: 400, contentMode: .fit) {
+                                Text(symbol).font(.largeTitle)
+                            }
                                 .frame(maxHeight: 180)
                             Button("Remove photo", role: .destructive) { self.imageData = nil }
                         }
@@ -84,10 +96,10 @@ struct RoutineStepEditorView: View {
                     }
                     .disabled(preparingVideo)
                     if preparingVideo { ProgressView("Preparing video") }
-                    if let videoPosterData, let image = UIImage(data: videoPosterData) {
-                        Image(uiImage: image)
-                            .resizable()
-                            .scaledToFit()
+                    if let videoPosterData {
+                        AsyncThumbnailImage(data: videoPosterData, maxPixelSize: 400, contentMode: .fit) {
+                            Image(systemName: "video").font(.largeTitle)
+                        }
                             .frame(maxHeight: 180)
                     }
                     if videoData != nil {
@@ -169,7 +181,7 @@ struct RoutineStepEditorView: View {
                 ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Save") { save() }
-                        .disabled(title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || recorder.isRecording || preparingVideo)
+                        .disabled(title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || recorder.isRecording || preparingVideo || pastingPhoto)
                         .accessibilityIdentifier("save-routine-step")
                 }
             }
@@ -178,7 +190,7 @@ struct RoutineStepEditorView: View {
                 Task {
                     do {
                         guard let data = try await photo.loadTransferable(type: Data.self),
-                              let prepared = PhotoProcessing.preparedData(from: data) else {
+                              let prepared = await PhotoProcessing.preparedDataAsync(from: data) else {
                             mediaError = "Could not open that photo. Try Files or another photo."
                             return
                         }
@@ -192,19 +204,18 @@ struct RoutineStepEditorView: View {
             .fileImporter(isPresented: $showingImageImporter, allowedContentTypes: [.image]) { result in
                 switch result {
                 case .success(let url):
-                    let access = url.startAccessingSecurityScopedResource()
-                    defer { if access { url.stopAccessingSecurityScopedResource() } }
-                    do {
-                        let data = try Data(contentsOf: url)
-                        guard let prepared = PhotoProcessing.preparedData(from: data) else {
-                            mediaError = "This file is not a usable image. Choose another photo."
-                            return
-                        }
-                        imageData = prepared
-                        videoData = nil
-                        videoPosterData = nil
-                        mediaError = nil
-                    } catch { mediaError = error.localizedDescription }
+                    Task {
+                        do {
+                            guard let prepared = try await PhotoProcessing.preparedDataAsync(fromFile: url) else {
+                                mediaError = "This file is not a usable image. Choose another photo."
+                                return
+                            }
+                            imageData = prepared
+                            videoData = nil
+                            videoPosterData = nil
+                            mediaError = nil
+                        } catch { mediaError = error.localizedDescription }
+                    }
                 case .failure(let error): mediaError = error.localizedDescription
                 }
             }

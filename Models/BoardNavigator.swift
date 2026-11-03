@@ -5,6 +5,10 @@ struct BoardNavigator {
     private(set) var history: [String] = []
     private var visitDepths: [Int] = []
 
+    init(startingBoard: String = "Core") {
+        currentBoard = startingBoard
+    }
+
     mutating func open(_ destination: String, behavior: BoardLinkBehavior,
                        availableBoards: [String]) -> Bool {
         guard destination != currentBoard, availableBoards.contains(destination) else { return false }

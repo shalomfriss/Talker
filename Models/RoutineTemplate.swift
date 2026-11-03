@@ -32,6 +32,18 @@ enum RoutineBoardMode: String, Codable, CaseIterable {
     }
 }
 
+enum RoutineRewardFrequency: String, Codable, CaseIterable {
+    case wholeRoutine
+    case eachStep
+
+    var label: String {
+        switch self {
+        case .wholeRoutine: "Whole routine"
+        case .eachStep: "Each step"
+        }
+    }
+}
+
 struct RoutineTemplate: Identifiable, Codable, Equatable {
     var id: UUID = UUID()
     var name: String
@@ -39,8 +51,9 @@ struct RoutineTemplate: Identifiable, Codable, Equatable {
     var firstThenLayout: FirstThenLayout = .automatic
     var boardMode: RoutineBoardMode = .firstThen
     var rewardChartID: UUID? = nil
+    var rewardFrequency: RoutineRewardFrequency = .wholeRoutine
 
-    private enum CodingKeys: String, CodingKey { case id, name, steps, firstThenLayout, boardMode, rewardChartID }
+    private enum CodingKeys: String, CodingKey { case id, name, steps, firstThenLayout, boardMode, rewardChartID, rewardFrequency }
 
     init(name: String, steps: [RoutineStep]) {
         self.name = name
@@ -59,6 +72,7 @@ struct RoutineTemplate: Identifiable, Codable, Equatable {
         firstThenLayout = try values.decodeIfPresent(FirstThenLayout.self, forKey: .firstThenLayout) ?? .automatic
         boardMode = try values.decodeIfPresent(RoutineBoardMode.self, forKey: .boardMode) ?? .firstThen
         rewardChartID = try values.decodeIfPresent(UUID.self, forKey: .rewardChartID)
+        rewardFrequency = try values.decodeIfPresent(RoutineRewardFrequency.self, forKey: .rewardFrequency) ?? .wholeRoutine
     }
 
     func freshSteps() -> [RoutineStep] {

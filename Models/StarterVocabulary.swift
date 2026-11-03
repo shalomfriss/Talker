@@ -30,13 +30,16 @@ enum StarterVocabulary {
                 CardPhrase(text: "What does that mean?", spanishText: "¿Qué significa eso?")
             ]
         ]
-        return rows.flatMap { category, entry in
+        let wordItems = rows.flatMap { category, entry in
             entry.split(separator: ",").map { part in
                 let bits = part.split(separator: "|", maxSplits: 1).map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
                 return CommunicationItem(label: bits[0], symbol: bits[1], message: bits[0],
                                          category: category, phraseOptions: phraseExamples["\(category)/\(bits[0])"])
             }
         }
+        return wordItems + [CommunicationItem(label: "Current time", symbol: "🕒",
+                                              message: "Current time", category: "Time",
+                                              action: .speakCurrentTime)]
     }()
 
     static let routines: [RoutineStep] = [

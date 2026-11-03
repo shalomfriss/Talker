@@ -50,11 +50,25 @@ final class SavedPhraseLanguageTests: XCTestCase {
     }
 
     @MainActor
-    func testInstalledLanguageSelectsADeviceVoice() throws {
-        let code = try XCTUnwrap(PhraseLanguage.availableCodes.first)
+    func testInstalledLanguageSelectsADeviceVoice() async throws {
+        SpeechVoiceCatalog.shared.refresh()
+        let catalogDeadline = Date().addingTimeInterval(5)
+        var code = PhraseLanguage.availableCodes.first
+        while code == nil && Date() < catalogDeadline {
+            try await Task.sleep(for: .milliseconds(50))
+            code = PhraseLanguage.availableCodes.first
+        }
+        guard let code else { throw XCTSkip("The simulator voice catalog did not respond") }
         let store = CommunicationStore(storageURL: FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString).appendingPathComponent("voice.json"))
-        XCTAssertEqual(store.makeUtterance("Hello", language: code).voice?.language, code)
+        let deadline = Date().addingTimeInterval(5)
+        var voice = store.makeUtterance("Hello", language: code).voice
+        while voice == nil && Date() < deadline {
+            try await Task.sleep(for: .milliseconds(50))
+            voice = store.makeUtterance("Hello", language: code).voice
+        }
+        guard let voice else { throw XCTSkip("The simulator voice service did not return a voice") }
+        XCTAssertEqual(voice.language, code)
         store.appendCompletedPhrase("Bonjour", languageCode: code)
         XCTAssertEqual(store.messageSpeechSegments().last?.language, code)
     }

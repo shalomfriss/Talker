@@ -668,6 +668,7 @@ struct ChoiceBoardSessionView: View {
         NavigationStack {
             VStack(spacing: 0) {
                 if store.settings.scanEnabled { scanControlBar }
+                else { QuickResponseBar() }
                 ScrollViewReader { scrollProxy in
                     ScrollView {
                         VStack(alignment: .leading, spacing: 18) {

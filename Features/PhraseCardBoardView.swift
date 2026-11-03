@@ -267,10 +267,12 @@ struct PhraseCardBoardView: View {
             else if store.appendTypedPhrase(phrase) { openKeyboard() }
         } label: {
             VStack(spacing: 10) {
-                if let data = phrase.imageData, let picture = UIImage(data: data) {
-                    Image(uiImage: picture)
-                        .resizable()
-                        .scaledToFill()
+                if let data = phrase.imageData {
+                    AsyncThumbnailImage(data: data) {
+                        Image(systemName: phrase.folderLink != nil ? "folder.fill" : isTemplate ? "text.badge.plus" :
+                              (phrase.audioData == nil ? "speaker.wave.2.fill" : "waveform"))
+                            .font(.system(size: 42))
+                    }
                         .frame(height: 100)
                         .frame(maxWidth: .infinity)
                         .clipped()

@@ -36,6 +36,12 @@ struct SceneHotspotVideoView: View {
         posterData = step.videoPosterData
     }
 
+    init(title: String, data: Data?, posterData: Data?) {
+        self.title = title
+        self.data = data
+        self.posterData = posterData
+    }
+
     var body: some View {
         NavigationStack {
             VStack(spacing: 20) {
@@ -49,11 +55,10 @@ struct SceneHotspotVideoView: View {
                     }
                     .buttonStyle(.borderedProminent)
                     .accessibilityIdentifier("hotspot-video-replay")
-                } else if let poster = posterData,
-                          let image = UIImage(data: poster) {
-                    Image(uiImage: image)
-                        .resizable()
-                        .scaledToFit()
+                } else if let poster = posterData {
+                    AsyncThumbnailImage(data: poster, maxPixelSize: 900, contentMode: .fit) {
+                        Image(systemName: "video").font(.largeTitle)
+                    }
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
                 if let errorMessage {
@@ -64,17 +69,23 @@ struct SceneHotspotVideoView: View {
             .navigationTitle(title)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Done") { dismiss() } } }
-            .onAppear { prepareVideo() }
+            .task { await prepareVideo() }
             .onDisappear { clearVideo() }
         }
     }
 
-    private func prepareVideo() {
+    private func prepareVideo() async {
         guard let data else { return }
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString).appendingPathExtension("mov")
         do {
-            try data.write(to: url, options: .atomic)
+            try await Task.detached(priority: .userInitiated) {
+                try data.write(to: url, options: .atomic)
+            }.value
+            guard !Task.isCancelled else {
+                try? FileManager.default.removeItem(at: url)
+                return
+            }
             videoURL = url
             let playback = AVPlayer(url: url)
             player = playback

@@ -7,6 +7,7 @@ struct RewardChartEditorView: View {
     @Environment(\.dismiss) private var dismiss
     private let chartID: UUID?
     @State private var title: String
+    @State private var pastingPhoto = false
     @State private var reward: String
     @State private var symbol: String
     @State private var targetTokens: Int
@@ -50,14 +51,20 @@ struct RewardChartEditorView: View {
                     PhotosPicker(selection: $selectedPhoto, matching: .images) {
                         Label("Choose photo from Photos", systemImage: "photo")
                     }
+                    PictureLibraryPickerButton(title: "Picture library",
+                                               identifier: "reward-chart-picture-library") { picture in
+                        photoData = picture.imageData
+                    }
                     CameraPhotoButton { photoData = $0 }
+                    PastePhotoButton(identifier: "reward-chart-paste-photo", onPastingChange: { pastingPhoto = $0 }) { photoData = $0 }
                     Button("Choose photo from Files", systemImage: "folder") {
                         showingImageImporter = true
                     }
-                    if let photoData, let image = UIImage(data: photoData) {
-                        Image(uiImage: image)
-                            .resizable()
-                            .scaledToFit()
+                    if let photoData {
+                        AsyncThumbnailImage(data: photoData, contentMode: .fit) {
+                            Text("Loading photo…")
+                                .foregroundStyle(.secondary)
+                        }
                             .frame(maxHeight: 180)
                             .accessibilityLabel("Reward photo preview")
                         Button("Remove photo", role: .destructive) { self.photoData = nil }
@@ -70,7 +77,7 @@ struct RewardChartEditorView: View {
                 ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Save") { save() }
-                        .disabled(!canSave)
+                        .disabled(!canSave || pastingPhoto)
                         .accessibilityIdentifier("reward-chart-save")
                 }
             }
@@ -79,7 +86,7 @@ struct RewardChartEditorView: View {
                 Task {
                     do {
                         guard let data = try await photo.loadTransferable(type: Data.self),
-                              let prepared = PhotoProcessing.preparedData(from: data) else {
+                              let prepared = await PhotoProcessing.preparedDataAsync(from: data) else {
                             mediaError = "Could not open that photo. Try Files or another photo."
                             return
                         }
@@ -91,17 +98,16 @@ struct RewardChartEditorView: View {
             .fileImporter(isPresented: $showingImageImporter, allowedContentTypes: [.image]) { result in
                 switch result {
                 case .success(let url):
-                    let access = url.startAccessingSecurityScopedResource()
-                    defer { if access { url.stopAccessingSecurityScopedResource() } }
-                    do {
-                        let data = try Data(contentsOf: url)
-                        guard let prepared = PhotoProcessing.preparedData(from: data) else {
-                            mediaError = "This file is not a usable image. Choose another photo."
-                            return
-                        }
-                        photoData = prepared
-                        mediaError = nil
-                    } catch { mediaError = error.localizedDescription }
+                    Task {
+                        do {
+                            guard let prepared = try await PhotoProcessing.preparedDataAsync(fromFile: url) else {
+                                mediaError = "This file is not a usable image. Choose another photo."
+                                return
+                            }
+                            photoData = prepared
+                            mediaError = nil
+                        } catch { mediaError = error.localizedDescription }
+                    }
                 case .failure(let error): mediaError = error.localizedDescription
                 }
             }

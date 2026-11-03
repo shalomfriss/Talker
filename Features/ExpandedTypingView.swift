@@ -22,21 +22,12 @@ struct ExpandedTypingView: View {
 
     private var sentenceSuggestions: [String] {
         guard cursorAtEnd else { return [] }
-        return SentencePrediction.suggestions(
-            for: store.typedMessage, phrases: store.phrases,
-            quickResponses: store.settings.quickResponses,
-            history: store.settings.saveHistory ? store.history : [],
-            learned: store.settings.learnPrediction ? store.learnedPrediction : nil,
-            language: store.settings.communicationLanguage)
+        return store.sentenceSuggestions()
     }
 
     private var wordSuggestions: [String] {
         guard cursorAtEnd else { return [] }
-        return WordPrediction.suggestions(
-            for: store.typedMessage, items: store.localizedItems(excludingPredictionKeys: true), phrases: store.phrases,
-            history: store.settings.saveHistory ? store.history : [],
-            learned: store.settings.learnPrediction ? store.learnedPrediction : nil,
-            language: store.settings.communicationLanguage)
+        return store.wordSuggestions()
     }
 
     private var matchingShortcuts: [SavedPhrase] {
@@ -66,7 +57,7 @@ struct ExpandedTypingView: View {
                                   textStyle: largeText ? .title1 : .title3) { previous, current in
                     store.previewTypedSpeech(previous: previous, current: current)
                 }
-                .id(store.activeConversationID)
+                .id(store.isPrivateConversationActive ? "private" : store.activeConversationID.uuidString)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .frame(minHeight: 180)
                 .padding(8)
@@ -150,6 +141,7 @@ struct ExpandedTypingView: View {
                 }
             }
             .onChange(of: store.activeConversationID) { _, _ in cursorOffsetValue = nil }
+            .onChange(of: store.isPrivateConversationActive) { _, _ in cursorOffsetValue = nil }
         }
     }
 

@@ -13,6 +13,21 @@ final class NearbyChatTests: XCTestCase {
         XCTAssertEqual(packet.tokens, [token])
     }
 
+    @MainActor
+    func testLargePicturePacketAsyncRoundTrip() async throws {
+        let image = Data(repeating: 0x7A, count: 10_000)
+        let tokens = (0..<100).map { index in
+            NearbyChatToken(text: "picture \(index)", imageData: image)
+        }
+        let outgoing = NearbyChatMessage(peerName: "My iPad", isMine: true,
+                                         text: "These are my pictures", tokens: tokens)
+        let data = try await NearbyChatPacket(message: outgoing).encodedAsync()
+        XCTAssertLessThan(data.count, 2_000_000)
+        let received = try NearbyChatPacket.decode(data)
+        XCTAssertEqual(received.id, outgoing.id)
+        XCTAssertEqual(received.tokens, tokens)
+    }
+
     func testPacketsRejectOversizedOrEmptyMessages() throws {
         let empty = NearbyChatMessage(peerName: "Me", isMine: true, text: "  ")
         XCTAssertThrowsError(try NearbyChatPacket(message: empty).encoded())
@@ -23,12 +38,13 @@ final class NearbyChatTests: XCTestCase {
     }
 
     @MainActor
-    func testPersonalPhotoIsReducedForPictureChat() throws {
+    func testPersonalPhotoIsReducedForPictureChat() async throws {
         let data = UIGraphicsImageRenderer(size: CGSize(width: 800, height: 600)).pngData { context in
             UIColor.systemTeal.setFill()
             context.fill(CGRect(x: 0, y: 0, width: 800, height: 600))
         }
-        let token = NearbyChatToken(PictureMessageToken(text: "my cup", symbol: nil, imageData: data))
+        let token = await NearbyChatToken.prepared(from:
+            PictureMessageToken(text: "my cup", symbol: nil, imageData: data))
         let shared = try XCTUnwrap(token.imageData)
         XCTAssertLessThan(shared.count, 100_000)
         let image = try XCTUnwrap(UIImage(data: shared))
@@ -91,7 +107,7 @@ final class NearbyChatTests: XCTestCase {
         let connected = await waitUntil { !first.connectedPeers.isEmpty && !second.connectedPeers.isEmpty }
         XCTAssertTrue(connected)
         guard connected else { return }
-        let outgoing = try first.send("I need water", pictureTokens: [
+        let outgoing = try await first.send("I need water", pictureTokens: [
             PictureMessageToken(text: "water", symbol: "💧", imageData: nil)
         ], to: peer)
         XCTAssertEqual(outgoing.recipientName, peer.displayName)
@@ -133,14 +149,15 @@ final class NearbyChatTests: XCTestCase {
         let connected = await waitUntil { alice.connectedPeers.count == 2 }
         XCTAssertTrue(connected)
         guard connected else { return }
-        try alice.send("For Bob", to: bobPeer)
+        try await alice.send("For Bob", to: bobPeer)
         let bobReceived = await waitUntil { bob.sessionMessages.count == 1 }
         XCTAssertTrue(bobReceived)
         try? await Task.sleep(for: .milliseconds(400))
         XCTAssertTrue(cara.sessionMessages.isEmpty)
-        try alice.send("For everyone")
+        try await alice.send("For everyone")
         let bothReceived = await waitUntil { bob.sessionMessages.count == 2 && cara.sessionMessages.count == 1 }
         XCTAssertTrue(bothReceived)
+        XCTAssertEqual(bob.sessionMessages.map(\.text), ["For Bob", "For everyone"])
         XCTAssertEqual(cara.sessionMessages.first?.text, "For everyone")
     }
 

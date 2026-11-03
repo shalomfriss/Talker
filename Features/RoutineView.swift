@@ -3,6 +3,7 @@ import SwiftUI
 
 struct RoutineView: View {
     @EnvironmentObject private var store: CommunicationStore
+    @Environment(\.scenePhase) private var scenePhase
     let onOpenSpeak: () -> Void
     @State private var newStep = ""
     @State private var newSymbol = "⭐️"
@@ -15,8 +16,9 @@ struct RoutineView: View {
     @State private var routinePDF: PDFPreviewPayload?
     @State private var showingRecordSaved = false
     @State private var waitDuration = 180
-    @State private var secondsRemaining = 180
-    @State private var timerIsRunning = false
+    @State private var waitClock = RoutineStepClock(durationSeconds: 180)
+    @State private var waitNow = Date()
+    @State private var showingFullScreenWait = false
     private let ticker = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
 
     init(onOpenSpeak: @escaping () -> Void) {
@@ -24,6 +26,12 @@ struct RoutineView: View {
     }
 
     private var remainingSteps: [RoutineStep] { store.routines.filter { !$0.isComplete } }
+    private var waitRemaining: Int { waitClock.secondsRemaining(at: waitNow) }
+    private var waitActionTitle: String {
+        if waitClock.isRunning { return "Pause" }
+        if waitRemaining == 0 { return "Start again" }
+        return waitRemaining == waitDuration ? "Start" : "Resume"
+    }
 
     var body: some View {
         NavigationStack(path: $timerPath) {
@@ -229,25 +237,27 @@ struct RoutineView: View {
                         Text("10 min").tag(600)
                     }
                     .onChange(of: waitDuration) { _, value in
-                        timerIsRunning = false
-                        secondsRemaining = value
+                        waitClock = RoutineStepClock(durationSeconds: value)
+                        waitNow = Date()
                     }
-                    ProgressView(value: Double(waitDuration - secondsRemaining), total: Double(waitDuration))
+                    ProgressView(value: Double(waitDuration - waitRemaining), total: Double(waitDuration))
                         .tint(.indigo)
                         .accessibilityLabel("Waiting progress")
-                    Text(secondsRemaining == 0 ? "All done waiting" : "\(secondsRemaining / 60):\(String(format: "%02d", secondsRemaining % 60)) left")
+                    Text(waitRemaining == 0 ? "All done waiting" : "\(waitRemaining / 60):\(String(format: "%02d", waitRemaining % 60)) left")
                         .font(.title2.monospacedDigit().weight(.semibold))
                     HStack {
-                        Button(timerIsRunning ? "Pause" : "Start", systemImage: timerIsRunning ? "pause.fill" : "play.fill") {
-                            if secondsRemaining == 0 { secondsRemaining = waitDuration }
-                            timerIsRunning.toggle()
+                        Button(waitActionTitle, systemImage: waitClock.isRunning ? "pause.fill" : "play.fill") {
+                            toggleWaitTimer()
                         }
                         .buttonStyle(.borderedProminent)
                         Button("Reset", systemImage: "arrow.counterclockwise") {
-                            timerIsRunning = false
-                            secondsRemaining = waitDuration
+                            resetWaitTimer()
                         }
                     }
+                    Button("Show waiting timer full screen", systemImage: "arrow.up.left.and.arrow.down.right") {
+                        showingFullScreenWait = true
+                    }
+                    .accessibilityIdentifier("open-full-screen-wait")
                 }
             }
             .navigationTitle("My routine")
@@ -276,18 +286,21 @@ struct RoutineView: View {
                 PrintableBoardsPreview(data: payload.data, title: "Routine PDF",
                                        filename: "Open Voice Routine")
             }
+            .fullScreenCover(isPresented: $showingFullScreenWait) {
+                FullScreenWaitingTimerView(clock: $waitClock, now: $waitNow,
+                                           onToggle: toggleWaitTimer, onReset: resetWaitTimer,
+                                           onOpenSpeak: onOpenSpeak)
+            }
             .alert("Routine recorded", isPresented: $showingRecordSaved) {
                 Button("OK") {}
             } message: {
                 Text("You can review or share this record in Routine history.")
             }
             .onReceive(ticker) { _ in
-                guard timerIsRunning else { return }
-                if secondsRemaining > 0 { secondsRemaining -= 1 }
-                if secondsRemaining == 0 {
-                    timerIsRunning = false
-                    store.speak("All done waiting")
-                }
+                advanceWaitTimer()
+            }
+            .onChange(of: scenePhase) { _, phase in
+                if phase == .active { advanceWaitTimer() }
             }
             .onChange(of: store.activeProfileID) { _, _ in
                 newStep = ""
@@ -300,10 +313,37 @@ struct RoutineView: View {
                 showingNewStepEditor = false
                 routinePDF = nil
                 showingRecordSaved = false
-                timerIsRunning = false
-                secondsRemaining = waitDuration
+                waitClock = RoutineStepClock(durationSeconds: waitDuration)
+                waitNow = Date()
+                showingFullScreenWait = false
             }
         }
+    }
+
+    private func toggleWaitTimer() {
+        let date = Date()
+        if waitClock.isRunning {
+            waitClock.pause(at: date)
+        } else if waitClock.secondsRemaining(at: date) == 0 ||
+                    waitClock.secondsRemaining(at: date) == waitDuration {
+            waitClock.start(at: date)
+        } else {
+            waitClock.resume(at: date)
+        }
+        waitNow = date
+    }
+
+    private func resetWaitTimer() {
+        waitClock.reset()
+        waitNow = Date()
+    }
+
+    private func advanceWaitTimer() {
+        guard waitClock.isRunning else { return }
+        waitNow = Date()
+        guard waitClock.secondsRemaining(at: waitNow) == 0 else { return }
+        waitClock.finish()
+        store.speak("All done waiting")
     }
 
     private func stepPreview(_ step: RoutineStep, heading: String) -> some View {
@@ -321,10 +361,11 @@ struct RoutineView: View {
 
     @ViewBuilder
     private func stepPicture(_ step: RoutineStep, size: CGFloat) -> some View {
-        if let imageData = step.displayImageData, let image = UIImage(data: imageData) {
-            Image(uiImage: image)
-                .resizable()
-                .scaledToFill()
+        if let imageData = step.displayImageData {
+            AsyncThumbnailImage(data: imageData) {
+                Text(step.symbol)
+                    .font(.system(size: size * 0.7))
+            }
                 .frame(width: size, height: size)
                 .clipShape(RoundedRectangle(cornerRadius: 8))
         } else {
@@ -332,5 +373,75 @@ struct RoutineView: View {
                 .font(.system(size: size * 0.7))
                 .frame(width: size, height: size)
         }
+    }
+}
+
+private struct FullScreenWaitingTimerView: View {
+    @Environment(\.dismiss) private var dismiss
+    @EnvironmentObject private var store: CommunicationStore
+    @Binding var clock: RoutineStepClock
+    @Binding var now: Date
+    let onToggle: () -> Void
+    let onReset: () -> Void
+    let onOpenSpeak: () -> Void
+
+    private var remaining: Int { clock.secondsRemaining(at: now) }
+    private var actionTitle: String {
+        if clock.isRunning { return "Pause" }
+        if remaining == 0 { return "Start again" }
+        return remaining == clock.durationSeconds ? "Start" : "Resume"
+    }
+
+    var body: some View {
+        GeometryReader { geometry in
+            VStack(spacing: 24) {
+                HStack {
+                    Button("Return to routine", systemImage: "xmark") { dismiss() }
+                        .buttonStyle(.bordered)
+                        .accessibilityIdentifier("close-full-screen-wait")
+                    Spacer()
+                    Text("Waiting timer")
+                        .font(.headline)
+                }
+                Spacer(minLength: 12)
+                Text(remaining == 0 ? "All done waiting" : "Time left")
+                    .font(.title.weight(.semibold))
+                    .multilineTextAlignment(.center)
+                Text("\(remaining / 60):\(String(format: "%02d", remaining % 60))")
+                    .font(.system(size: min(220, max(84, geometry.size.width * 0.23)),
+                                  weight: .bold, design: .rounded).monospacedDigit())
+                    .minimumScaleFactor(0.6)
+                    .lineLimit(1)
+                    .accessibilityLabel("\(remaining / 60) minutes, \(remaining % 60) seconds left")
+                    .accessibilityIdentifier("full-screen-wait-remaining")
+                ProgressView(value: Double(clock.durationSeconds - remaining),
+                             total: Double(clock.durationSeconds))
+                    .tint(store.settings.highContrast ? .black : .indigo)
+                    .accessibilityLabel("Waiting progress")
+                HStack(spacing: 16) {
+                    Button(actionTitle, systemImage: clock.isRunning ? "pause.fill" : "play.fill",
+                           action: onToggle)
+                        .buttonStyle(.borderedProminent)
+                        .accessibilityIdentifier("full-screen-wait-toggle")
+                    Button("Reset", systemImage: "arrow.counterclockwise", action: onReset)
+                        .buttonStyle(.bordered)
+                        .accessibilityIdentifier("full-screen-wait-reset")
+                }
+                .controlSize(.large)
+                Spacer(minLength: 12)
+                Button("Open Speak", systemImage: "quote.bubble.fill") {
+                    dismiss()
+                    onOpenSpeak()
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.large)
+                .accessibilityIdentifier("full-screen-wait-open-speak")
+            }
+            .frame(maxWidth: 680)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .padding(24)
+        }
+        .background(store.settings.highContrast ? Color.white : Color.indigo.opacity(0.08))
+        .tint(store.settings.highContrast ? .black : .indigo)
     }
 }

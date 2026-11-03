@@ -18,10 +18,10 @@ enum SentencePrediction {
         func consider(_ text: String, weight: Int) {
             defer { order += 1 }
             let candidate = text.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard candidate.count <= 300, candidate.split(whereSeparator: \.isWhitespace).count >= 2,
-                  !candidate.contains("{"), searchKey(candidate).hasPrefix(prefix),
-                  searchKey(candidate) != prefix else { return }
+            guard candidate.count <= 300, !candidate.contains("{") else { return }
             let key = searchKey(candidate)
+            guard key.hasPrefix(prefix), key != prefix,
+                  candidate.split(whereSeparator: \.isWhitespace).count >= 2 else { return }
             if let existing = scores[key] {
                 scores[key] = (existing.text, existing.score + weight, existing.order)
             } else {
@@ -33,7 +33,7 @@ enum SentencePrediction {
         for response in quickResponses {
             consider(response.displayedText(language: language), weight: 8)
         }
-        for (index, message) in history.prefix(50).enumerated() {
+        for (index, message) in history.lazy.filter({ $0.speaker != .partner }).prefix(50).enumerated() {
             consider(message.text, weight: index < 10 ? 5 : 3)
         }
         if let learned {
@@ -52,9 +52,10 @@ enum SentencePrediction {
     }
 
     static func completing(_ text: String, with suggestion: String) -> String? {
-        guard let active = activeSentence(in: text),
-              searchKey(suggestion).hasPrefix(searchKey(active.prefix)),
-              searchKey(suggestion) != searchKey(active.prefix) else { return nil }
+        guard let active = activeSentence(in: text) else { return nil }
+        let candidateKey = searchKey(suggestion)
+        let prefix = searchKey(active.prefix)
+        guard candidateKey.hasPrefix(prefix), candidateKey != prefix else { return nil }
         var result = text
         result.replaceSubrange(active.range, with: suggestion)
         return result

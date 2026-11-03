@@ -114,7 +114,7 @@ struct DrawingBoardView: View {
                         }
                         Section {
                             Button("Speak reviewed words", systemImage: "speaker.wave.2") {
-                                store.speak(recognizedWriting, saveToHistory: true)
+                                store.speak(recognizedWriting, saveToHistory: true, inputMode: .writing)
                             }
                             .disabled(recognizedWriting.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                             .accessibilityIdentifier("speak-drawing-text")

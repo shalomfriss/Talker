@@ -48,6 +48,7 @@ final class SpeechHighlightDelegate: NSObject, AVSpeechSynthesizerDelegate {
                                        didFinish utterance: AVSpeechUtterance) {
         let id = ObjectIdentifier(utterance)
         Task { @MainActor [weak self] in
+            self?.store?.speechUtteranceDidEnd(id)
             self?.store?.finishSpeechHighlight(for: id)
             self?.store?.finishMessagePlayback(for: id)
         }
@@ -57,6 +58,7 @@ final class SpeechHighlightDelegate: NSObject, AVSpeechSynthesizerDelegate {
                                        didCancel utterance: AVSpeechUtterance) {
         let id = ObjectIdentifier(utterance)
         Task { @MainActor [weak self] in
+            self?.store?.speechUtteranceDidEnd(id)
             self?.store?.cancelSpeechHighlight(for: id)
             self?.store?.finishMessagePlayback(for: id)
         }

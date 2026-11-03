@@ -23,14 +23,12 @@ struct SceneBoardsView: View {
                         HStack(spacing: 12) {
                             Button { presentation = .session(board) } label: {
                                 HStack(spacing: 12) {
-                                    if let image = UIImage(data: board.imageData) {
-                                        Image(uiImage: image)
-                                            .resizable()
-                                            .scaledToFill()
+                                    AsyncThumbnailImage(data: board.imageData, maxPixelSize: 180) {
+                                        Color(uiColor: .secondarySystemBackground)
+                                    }
                                             .frame(width: 72, height: 54)
                                             .clipShape(RoundedRectangle(cornerRadius: 8))
                                             .accessibilityHidden(true)
-                                    }
                                     VStack(alignment: .leading, spacing: 3) {
                                         Text(board.title).font(.headline)
                                         Text("\(board.hotspots.count) words · \(board.isVideoScene ? "Video" : "Photo")")

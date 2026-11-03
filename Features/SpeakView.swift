@@ -17,6 +17,136 @@ private struct MessageButtonDraft: Identifiable {
     let language: String
 }
 
+private struct BoardIndicators {
+    var focusBoards: Set<String> = []
+    var suggestedBoards: Set<String> = []
+}
+
+struct BoardSuggestionKey: Equatable {
+    let profileID: UUID
+    let message: String
+    let contentRevision: Int
+    let exploringAllWords: Bool
+    let finderTargetID: UUID?
+}
+
+@MainActor
+final class BoardSuggestionCache {
+    private var key: BoardSuggestionKey?
+    private var ids: Set<UUID> = []
+
+    func value(for key: BoardSuggestionKey, calculate: () -> Set<UUID>) -> Set<UUID> {
+        if self.key == key { return ids }
+        let result = calculate()
+        self.key = key
+        ids = result
+        return result
+    }
+}
+
+private struct BoardPresentationKey: Equatable {
+    let profileID: UUID
+    let itemsRevision: Int
+    let board: String
+    let stage: VocabularyStage
+    let exploringAllWords: Bool
+    let finderTargetID: UUID?
+}
+
+private struct BoardItemsKey: Equatable {
+    let profileID: UUID
+    let itemsRevision: Int
+    let board: String
+}
+
+@MainActor
+private final class BoardPresentationCache {
+    private var rawKey: BoardItemsKey?
+    private var rawItems: [CommunicationItem] = []
+    private var key: BoardPresentationKey?
+    private var items: [CommunicationItem] = []
+    private var slotKey: BoardPresentationKey?
+    private var emptyPositions: Set<Int> = []
+    private var slots: [CommunicationItem?] = []
+    private var pageKey: BoardPresentationKey?
+    private var pageEmptyPositions: Set<Int> = []
+    private var pageLayout: BoardGridLayout?
+    private var pageIndex = -1
+    private var pageSlots: [CommunicationItem?] = []
+
+    func boardItems(for key: BoardItemsKey,
+                    calculate: () -> [CommunicationItem]) -> [CommunicationItem] {
+        if rawKey == key { return rawItems }
+        rawItems = calculate()
+        rawKey = key
+        return rawItems
+    }
+
+    func displayedItems(for key: BoardPresentationKey,
+                        calculate: () -> [CommunicationItem]) -> [CommunicationItem] {
+        if self.key == key { return items }
+        items = calculate()
+        self.key = key
+        return items
+    }
+
+    func allSlots(for key: BoardPresentationKey, emptyPositions: Set<Int>,
+                  calculate: () -> [CommunicationItem?]) -> [CommunicationItem?] {
+        if slotKey == key && self.emptyPositions == emptyPositions { return slots }
+        slots = calculate()
+        slotKey = key
+        self.emptyPositions = emptyPositions
+        return slots
+    }
+
+    func visiblePage(for key: BoardPresentationKey, emptyPositions: Set<Int>,
+                     layout: BoardGridLayout, page: Int,
+                     calculate: () -> [CommunicationItem?]) -> [CommunicationItem?] {
+        if pageKey == key && pageEmptyPositions == emptyPositions &&
+            pageLayout == layout && pageIndex == page { return pageSlots }
+        pageSlots = calculate()
+        pageKey = key
+        pageEmptyPositions = emptyPositions
+        pageLayout = layout
+        pageIndex = page
+        return pageSlots
+    }
+}
+
+private struct BoardScanTargetsKey: Equatable {
+    let presentation: BoardPresentationKey
+    let translationsRevision: Int
+    let page: Int
+    let layout: BoardGridLayout?
+    let emptyPositions: Set<Int>
+    let columns: Int
+    let group: ScanGroup
+    let selectedLine: Int
+    let pattern: ScanPattern
+    let dimmedButtonsActive: Bool
+    let hasBack: Bool
+    let hasMessage: Bool
+    let hasTyping: Bool
+    let boards: [String]
+    let boardOnlyMode: Bool
+    let language: String
+    let typedMessage: String
+    let predictionRevision: Int
+}
+
+@MainActor
+private final class BoardScanTargetsCache {
+    private var key: BoardScanTargetsKey?
+    private var targets: [ScanTarget] = []
+
+    func value(for key: BoardScanTargetsKey, calculate: () -> [ScanTarget]) -> [ScanTarget] {
+        if self.key == key { return targets }
+        targets = calculate()
+        self.key = key
+        return targets
+    }
+}
+
 struct SpeakView: View {
     @EnvironmentObject private var store: CommunicationStore
     @EnvironmentObject private var nearby: NearbyChatService
@@ -30,8 +160,10 @@ struct SpeakView: View {
     @State private var boardPageIndex = 0
     @State private var selectedBoardCluster: Int?
     @State private var isVisible = false
-    @State private var hasOpenedHomeBoard = false
     @State private var repeatTapFilter = RepeatTapFilter()
+    @State private var boardSuggestionCache = BoardSuggestionCache()
+    @State private var boardPresentationCache = BoardPresentationCache()
+    @State private var boardScanTargetsCache = BoardScanTargetsCache()
     @State private var pendingScanWordID: UUID?
     @State private var lastScanActivation = Date.distantPast
     @State private var search = ""
@@ -65,6 +197,7 @@ struct SpeakView: View {
     @State private var showingCallAudio = false
     @State private var showingNearbySendError = false
     @State private var nearbySendError = ""
+    @State private var isSendingNearby = false
     @State private var showingConversations = false
     @State private var showingNotes = false
     @State private var showingFocus = false
@@ -77,6 +210,7 @@ struct SpeakView: View {
     @State private var showingReadAloud = false
     @State private var showingAlphabetKeyboard = false
     @State private var showingSingleButton = false
+    @State private var showingSpeakingClock = false
     @State private var showingBedside = false
     @State private var showingLanyard = false
     @State private var showingSpeechVolume = false
@@ -91,6 +225,11 @@ struct SpeakView: View {
     @State private var showingAudioShareError = false
     @State private var audioShareError = ""
 
+    init(isTyping: Binding<Bool>, homeBoard: String) {
+        _isTyping = isTyping
+        _navigator = State(initialValue: BoardNavigator(startingBoard: homeBoard))
+    }
+
     private var focusedWordIDs: Set<UUID> {
         focusActive ? Set(store.settings.focusWordIDs) : []
     }
@@ -100,14 +239,14 @@ struct SpeakView: View {
     private var coreTileSize: TileSize { store.tileSize(for: "Core") }
 
     private var currentBoardUsesTyping: Bool {
-        store.items.contains {
+        rawBoardItems.contains {
             $0.category == navigator.currentBoard
                 && $0.boardVisibility != .hidden && $0.effectiveAction.isTypingAction
         }
     }
 
     private var currentBoardHasPredictionKeys: Bool {
-        store.items.contains {
+        rawBoardItems.contains {
             $0.category == navigator.currentBoard
                 && $0.boardVisibility != .hidden
                 && $0.effectiveAction == .completeTypedPrediction
@@ -116,7 +255,11 @@ struct SpeakView: View {
 
     private var effectiveGridLayout: BoardGridLayout? {
         guard search.isEmpty && !usesGroupedPictureBoard else { return nil }
-        return store.gridLayout(for: navigator.currentBoard)
+        if let configured = store.gridLayout(for: navigator.currentBoard) { return configured }
+        guard store.categories.contains(navigator.currentBoard), displayedItems.count > 120 else { return nil }
+        let columns = BoardScanner.columnCount(availableWidth: boardAvailableWidth,
+                                               minimumTileWidth: effectiveTileSize.minimumWidth)
+        return BoardGridLayout(columns: columns, rows: 16)
     }
 
     private var boardColumnCount: Int {
@@ -127,7 +270,9 @@ struct SpeakView: View {
 
     private var boardPageCount: Int {
         guard let effectiveGridLayout else { return 1 }
-        return effectiveGridLayout.pageCount(for: allBoardSlots.count)
+        let count = BoardSlotLayout.slotCount(itemCount: displayedItems.count,
+                                              emptyPositions: store.emptyGridPositions(in: navigator.currentBoard))
+        return effectiveGridLayout.pageCount(for: count)
     }
 
     private var currentBoardPage: Int { min(boardPageIndex, boardPageCount - 1) }
@@ -136,15 +281,26 @@ struct SpeakView: View {
         guard search.isEmpty && !usesGroupedPictureBoard && store.categories.contains(navigator.currentBoard) else {
             return displayedItems.map(Optional.some)
         }
-        return BoardSlotLayout.slots(for: displayedItems,
-                                     emptyPositions: store.emptyGridPositions(in: navigator.currentBoard))
+        let emptyPositions = store.emptyGridPositions(in: navigator.currentBoard)
+        return boardPresentationCache.allSlots(for: boardPresentationKey,
+                                               emptyPositions: emptyPositions) {
+            BoardSlotLayout.slots(for: displayedItems, emptyPositions: emptyPositions)
+        }
     }
 
     private var boardPageSlots: [CommunicationItem?] {
         guard let effectiveGridLayout else { return allBoardSlots }
-        let page = Array(allBoardSlots[effectiveGridLayout.range(for: currentBoardPage,
-                                                                 itemCount: allBoardSlots.count)])
-        return page + Array(repeating: nil, count: effectiveGridLayout.pageCapacity - page.count)
+        let emptyPositions = store.emptyGridPositions(in: navigator.currentBoard)
+        if navigator.currentBoard == recentBoardName {
+            return BoardSlotLayout.pageSlots(for: displayedItems, emptyPositions: emptyPositions,
+                                             layout: effectiveGridLayout, page: boardPageIndex)
+        }
+        return boardPresentationCache.visiblePage(for: boardPresentationKey,
+                                                  emptyPositions: emptyPositions,
+                                                  layout: effectiveGridLayout, page: boardPageIndex) {
+            BoardSlotLayout.pageSlots(for: displayedItems, emptyPositions: emptyPositions,
+                                      layout: effectiveGridLayout, page: boardPageIndex)
+        }
     }
 
     private var boardGridContentWidth: CGFloat {
@@ -209,31 +365,36 @@ struct SpeakView: View {
         finderTargetID = id
     }
 
-    private func focusBoardContains(_ name: String) -> Bool {
-        store.items.contains { item in
-            focusedWordIDs.contains(item.id)
-                && item.isBoardSelectable(dimmedButtonsActive: store.settings.dimmedButtonsActive)
-                && (name == recentBoardName
-                    || ProgressiveVocabulary.isAvailable(item, stage: store.settings.progressiveVocabularyStage,
-                                                        exploring: exploringAllWords))
-                && (name == "Favorites" ? item.isFavorite
-                    : (name == recentBoardName ? store.settings.recentPictureWordIDs.contains(item.id)
-                       && store.settings.recentPictureWordsEnabled : item.category == name))
+    private func boardIndicators(suggestedIDs: Set<UUID>) -> BoardIndicators {
+        let focusIDs = focusedWordIDs
+        guard !focusIDs.isEmpty || !suggestedIDs.isEmpty else { return BoardIndicators() }
+        let recentIDs = Set(store.settings.recentPictureWordIDs)
+        let recentEnabled = store.settings.recentPictureWordsEnabled
+        let recentName = recentBoardName
+        let dimmedButtonsActive = store.settings.dimmedButtonsActive
+        let stage = store.settings.progressiveVocabularyStage
+        var indicators = BoardIndicators()
+        for item in store.items {
+            let isRecent = recentEnabled && recentIDs.contains(item.id)
+            if suggestedIDs.contains(item.id) {
+                if item.category != "Favorites" { indicators.suggestedBoards.insert(item.category) }
+                if item.isFavorite { indicators.suggestedBoards.insert("Favorites") }
+                if isRecent { indicators.suggestedBoards.insert(recentName) }
+            }
+            if focusIDs.contains(item.id) && item.isBoardSelectable(dimmedButtonsActive: dimmedButtonsActive) {
+                if isRecent { indicators.focusBoards.insert(recentName) }
+                if ProgressiveVocabulary.isAvailable(item, stage: stage, exploring: exploringAllWords) {
+                    if item.category != "Favorites" { indicators.focusBoards.insert(item.category) }
+                    if item.isFavorite { indicators.focusBoards.insert("Favorites") }
+                }
+            }
         }
-    }
-
-    private func suggestedBoardContains(_ name: String, ids: Set<UUID>) -> Bool {
-        store.items.contains { item in
-            ids.contains(item.id)
-                && (name == "Favorites" ? item.isFavorite
-                    : (name == recentBoardName ? store.settings.recentPictureWordIDs.contains(item.id)
-                       && store.settings.recentPictureWordsEnabled : item.category == name))
-        }
+        return indicators
     }
 
     private var visibleItems: [CommunicationItem] {
         if search.isEmpty && navigator.currentBoard == recentBoardName { return store.recentPictureItems }
-        let source = search.isEmpty ? store.items.filter { $0.category == navigator.currentBoard } : store.items.filter {
+        let source = search.isEmpty ? rawBoardItems : store.items.filter {
             $0.boardVisibility != .hidden &&
                 ($0.label.localizedCaseInsensitiveContains(search) || $0.message.localizedCaseInsensitiveContains(search)
                  || store.displayLabel(for: $0).localizedCaseInsensitiveContains(search))
@@ -241,15 +402,33 @@ struct SpeakView: View {
         return source
     }
 
-    private var displayedItems: [CommunicationItem] {
-        let items = navigator.currentBoard == "Favorites" && search.isEmpty
-            ? store.items.filter(\.isFavorite) : visibleItems
-        guard search.isEmpty && navigator.currentBoard != "Favorites"
-                && navigator.currentBoard != recentBoardName else { return items }
-        return items.map {
-            ProgressiveVocabulary.displayed($0, stage: store.settings.progressiveVocabularyStage,
-                                            exploring: exploringAllWords || finderTargetID == $0.id)
+    private var rawBoardItems: [CommunicationItem] {
+        let key = BoardItemsKey(profileID: store.activeProfileID, itemsRevision: store.itemsRevision,
+                                board: navigator.currentBoard)
+        return boardPresentationCache.boardItems(for: key) {
+            store.items.filter { $0.category == navigator.currentBoard }
         }
+    }
+
+    private var displayedItems: [CommunicationItem] {
+        guard search.isEmpty && navigator.currentBoard != "Favorites"
+                && navigator.currentBoard != recentBoardName else {
+            return navigator.currentBoard == "Favorites" && search.isEmpty
+                ? store.items.filter(\.isFavorite) : visibleItems
+        }
+        return boardPresentationCache.displayedItems(for: boardPresentationKey) {
+            rawBoardItems.map {
+                ProgressiveVocabulary.displayed($0, stage: store.settings.progressiveVocabularyStage,
+                                                exploring: exploringAllWords || finderTargetID == $0.id)
+            }
+        }
+    }
+
+    private var boardPresentationKey: BoardPresentationKey {
+        BoardPresentationKey(profileID: store.activeProfileID, itemsRevision: store.itemsRevision,
+                             board: navigator.currentBoard,
+                             stage: store.settings.progressiveVocabularyStage,
+                             exploringAllWords: exploringAllWords, finderTargetID: finderTargetID)
     }
 
     private var usesGroupedPictureBoard: Bool {
@@ -285,16 +464,24 @@ struct SpeakView: View {
 
     private var suggestedBoardWordIDs: Set<UUID> {
         guard store.settings.showBoardSuggestions else { return [] }
-        let candidates = store.localizedItems(excludingPredictionKeys: true).filter {
-            $0.isBoardSelectable(dimmedButtonsActive: store.settings.dimmedButtonsActive)
-                && ProgressiveVocabulary.isAvailable($0, stage: store.settings.progressiveVocabularyStage,
-                                                    exploring: exploringAllWords)
+        let message = store.composedMessage
+        guard !message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return [] }
+        let key = BoardSuggestionKey(profileID: store.activeProfileID, message: message,
+                                     contentRevision: store.predictionContentRevision,
+                                     exploringAllWords: exploringAllWords,
+                                     finderTargetID: finderTargetID)
+        return boardSuggestionCache.value(for: key) {
+            let candidates = store.localizedItems(excludingPredictionKeys: true).filter {
+                $0.isBoardSelectable(dimmedButtonsActive: store.settings.dimmedButtonsActive)
+                    && ProgressiveVocabulary.isAvailable($0, stage: store.settings.progressiveVocabularyStage,
+                                                        exploring: exploringAllWords)
+            }
+            return Set(WordPrediction.boardItemIDs(
+                after: message, items: candidates, phrases: store.phrases,
+                history: store.settings.saveHistory ? store.history : [],
+                learned: store.settings.learnPrediction ? store.learnedPrediction : nil,
+                language: store.settings.communicationLanguage))
         }
-        return Set(WordPrediction.boardItemIDs(
-            after: store.composedMessage, items: candidates, phrases: store.phrases,
-            history: store.settings.saveHistory ? store.history : [],
-            learned: store.settings.learnPrediction ? store.learnedPrediction : nil,
-            language: store.settings.communicationLanguage))
     }
 
     private var progressiveVocabularyBanner: some View {
@@ -316,20 +503,45 @@ struct SpeakView: View {
 
     private var scanTargets: [ScanTarget] {
         guard store.settings.scanEnabled else { return [] }
-        let pageSlots = boardPageSlots
-        let targets = scanner.targets(quickWords: currentBoardUsesTyping ? [] : quickWords.map(scanningItem),
-                                      boardItems: pageSlots.compactMap { $0 }.map(scanningItem),
-                                      emptyPositions: Set(pageSlots.indices.filter { pageSlots[$0] == nil }),
-                                      boards: store.visibleBoards + (store.settings.recentPictureWordsEnabled ? [recentBoardName] : []),
-                                      hasBack: !navigator.history.isEmpty,
-                                      hasMessage: !currentBoardUsesTyping && !store.messageParts.isEmpty,
-                                      pattern: store.settings.scanPattern, columns: boardColumnCount,
-                                      hasPreviousPage: currentBoardPage > 0,
-                                      hasNextPage: currentBoardPage + 1 < boardPageCount,
-                                      dimmedButtonsActive: store.settings.dimmedButtonsActive)
-        return store.isBoardOnlyModeActive
-            ? targets.filter { $0 != .conversations && $0 != .focusWords }
-            : targets
+        let scansBoardWords = scanner.group == .words || scanner.group == .line
+        let hasTyping = currentBoardUsesTyping
+        let boards = scanner.group == .boards
+            ? store.visibleBoards + (store.settings.recentPictureWordsEnabled ? [recentBoardName] : []) : []
+        let hasBack = scanner.group == .boards && !navigator.history.isEmpty
+        let hasMessage = scanner.group == .message && !hasTyping && !store.messageParts.isEmpty
+        let key = BoardScanTargetsKey(
+            presentation: boardPresentationKey,
+            translationsRevision: store.wordTranslationsRevision,
+            page: boardPageIndex, layout: effectiveGridLayout,
+            emptyPositions: store.emptyGridPositions(in: navigator.currentBoard),
+            columns: scansBoardWords ? boardColumnCount : 1,
+            group: scanner.group, selectedLine: scanner.selectedLine,
+            pattern: store.settings.scanPattern,
+            dimmedButtonsActive: store.settings.dimmedButtonsActive,
+            hasBack: hasBack, hasMessage: hasMessage, hasTyping: hasTyping,
+            boards: boards, boardOnlyMode: store.isBoardOnlyModeActive,
+            language: store.settings.communicationLanguage,
+            typedMessage: store.typedMessage,
+            predictionRevision: store.predictionContentRevision)
+        let calculate: () -> [ScanTarget] = {
+            let pageSlots = scansBoardWords ? boardPageSlots : []
+            let targets = scanner.targets(quickWords: scanner.group == .words && !hasTyping
+                                              ? quickWords.map(scanningItem) : [],
+                                          boardItems: pageSlots.compactMap { $0 }.map(scanningItem),
+                                          emptyPositions: Set(pageSlots.indices.filter { pageSlots[$0] == nil }),
+                                          boards: boards, hasBack: hasBack, hasMessage: hasMessage,
+                                          pattern: store.settings.scanPattern,
+                                          columns: scansBoardWords ? boardColumnCount : 1,
+                                          hasPreviousPage: scanner.group == .words && currentBoardPage > 0,
+                                          hasNextPage: scanner.group == .words && currentBoardPage + 1 < boardPageCount,
+                                          dimmedButtonsActive: store.settings.dimmedButtonsActive)
+            return store.isBoardOnlyModeActive
+                ? targets.filter { $0 != .conversations && $0 != .focusWords }
+                : targets
+        }
+        guard search.isEmpty && navigator.currentBoard != "Favorites"
+                && navigator.currentBoard != recentBoardName else { return calculate() }
+        return boardScanTargetsCache.value(for: key, calculate: calculate)
     }
 
     private var highlightedTarget: ScanTarget? {
@@ -349,7 +561,7 @@ struct SpeakView: View {
             || showingListeningReply
             || showingReadAloud
             || showingAlphabetKeyboard
-            || showingSingleButton || showingWordForms || showingCommunicationRepair || showingBoardOnlyUnlock
+            || showingSingleButton || showingSpeakingClock || showingWordForms || showingCommunicationRepair || showingBoardOnlyUnlock
             || showingLanyard
             || showingSpeechVolume
             || showingNearbyChat
@@ -476,6 +688,15 @@ struct SpeakView: View {
                         .accessibilityIdentifier("board-only-unlock")
                     } else {
                     Menu {
+                        if store.visibleBoards.contains(navigator.currentBoard) {
+                            Button(store.homeBoard == navigator.currentBoard
+                                   ? "Current home board: \(navigator.currentBoard)"
+                                   : "Make \(navigator.currentBoard) home board",
+                                   systemImage: "house") {
+                                store.setHomeBoard(navigator.currentBoard)
+                            }
+                            .accessibilityIdentifier("customize-set-home-board")
+                        }
                         Button("Add button", systemImage: "plus") { showingAdd = true }
                         Button("Add several buttons", systemImage: "text.badge.plus") { showingBulkAdd = true }
                         Button("Add spelling board", systemImage: "textformat.abc") {
@@ -500,6 +721,10 @@ struct SpeakView: View {
                         Button("My communication passport", systemImage: "person.text.rectangle") { showingPassport = true }
                         Button("Choice boards", systemImage: "square.grid.2x2") { showingChoices = true }
                         Button("Scenes", systemImage: "photo.on.rectangle") { showingScenes = true }
+                        Button("Speaking clock", systemImage: "clock.fill") {
+                            showingSpeakingClock = true
+                        }
+                        .accessibilityIdentifier("open-speaking-clock")
                         Button("Focus words", systemImage: "scope") { showingFocus = true }
                         Button("Practice together", systemImage: "person.2") {
                             showingPracticeSetup = true
@@ -527,15 +752,6 @@ struct SpeakView: View {
                             store.settings.twoBoardsEnabled.toggle()
                         }
                         .accessibilityIdentifier("customize-two-boards")
-                        if store.visibleBoards.contains(navigator.currentBoard) {
-                            Button(store.homeBoard == navigator.currentBoard
-                                   ? "Current home board: \(navigator.currentBoard)"
-                                   : "Make \(navigator.currentBoard) home board",
-                                   systemImage: "house") {
-                                store.setHomeBoard(navigator.currentBoard)
-                            }
-                            .accessibilityIdentifier("customize-set-home-board")
-                        }
                     } label: {
                         Label("Customize", systemImage: "plus")
                     }
@@ -566,6 +782,9 @@ struct SpeakView: View {
             }
             .fullScreenCover(isPresented: $showingSingleButton) {
                 SingleButtonView()
+            }
+            .fullScreenCover(isPresented: $showingSpeakingClock) {
+                SpeakingClockView()
             }
             .fullScreenCover(isPresented: $showingBedside) {
                 BedsideView()
@@ -771,12 +990,7 @@ struct SpeakView: View {
                 }
             }
             .onAppear {
-                if !hasOpenedHomeBoard {
-                    navigator.goTo(store.homeBoard)
-                    hasOpenedHomeBoard = true
-                }
                 isVisible = true
-                callAudio.refresh()
             }
             .onReceive(NotificationCenter.default.publisher(for: AVAudioSession.microphoneInjectionCapabilitiesChangeNotification)) { _ in
                 callAudio.refresh()
@@ -867,11 +1081,7 @@ struct SpeakView: View {
     }
 
     private var gridTypingBar: some View {
-        let suggestions = WordPrediction.suggestions(
-            for: store.typedMessage, items: store.localizedItems(excludingPredictionKeys: true), phrases: store.phrases,
-            history: store.settings.saveHistory ? store.history : [],
-            learned: store.settings.learnPrediction ? store.learnedPrediction : nil,
-            language: store.settings.communicationLanguage)
+        let suggestions = store.wordSuggestions()
         return VStack(alignment: .leading, spacing: 10) {
             HStack {
                 Text("Typed message")
@@ -1035,9 +1245,11 @@ struct SpeakView: View {
                     .accessibilityIdentifier("message-communication-repair")
                     ShareLink(item: store.composedMessage) { Label("Share message", systemImage: "square.and.arrow.up") }
                     if !nearby.connectedPeers.isEmpty {
-                        Button("Send nearby", systemImage: "bubble.left.and.bubble.right") {
+                        Button(isSendingNearby ? "Sending…" : "Send nearby",
+                               systemImage: "bubble.left.and.bubble.right") {
                             sendNearby(store.composedMessage, pictureTokens: store.pictureMessageTokens)
                         }
+                        .disabled(isSendingNearby)
                     }
                     Button("Nearby chat", systemImage: "bubble.left.and.bubble.right") {
                         showingNearbyChat = true
@@ -1135,14 +1347,23 @@ struct SpeakView: View {
 
     private func boardGrid(suggestedIDs: Set<UUID>) -> some View {
         let timeIDs = store.timeOfDayHighlightIDs(for: navigator.currentBoard, hour: timeHighlightHour)
+        let recentIDs = store.recentPictureHighlightIDs
+        let labelsVisible = !search.isEmpty || store.boardTileLabelsVisible(for: navigator.currentBoard)
+        let highlightsRecent = search.isEmpty && store.categories.contains(navigator.currentBoard)
+        let scanHighlight = highlightedTarget
+        let scanColumns = boardColumnCount
+        let focusIDs = focusedWordIDs
         return LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 10),
-                                 count: boardColumnCount), spacing: 10) {
+                                 count: scanColumns), spacing: 10) {
             ForEach(Array(boardPageSlots.enumerated()), id: \.offset) { entry in
                 if let item = entry.element {
                     boardItemCell(item, position: entry.offset, suggestedIDs: suggestedIDs,
-                                  timeOfDayIDs: timeIDs)
+                                  timeOfDayIDs: timeIDs, recentIDs: recentIDs,
+                                  highlightsRecent: highlightsRecent, labelsVisible: labelsVisible,
+                                  scanHighlight: scanHighlight, scanColumns: scanColumns, focusIDs: focusIDs)
                 } else {
-                    hiddenBoardSlot(position: entry.offset)
+                    hiddenBoardSlot(position: entry.offset, scanHighlight: scanHighlight,
+                                    scanColumns: scanColumns)
                 }
             }
         }
@@ -1222,6 +1443,7 @@ struct SpeakView: View {
 
     private var picturePanel: some View {
         let suggestedIDs = suggestedBoardWordIDs
+        let indicators = boardIndicators(suggestedIDs: suggestedIDs)
         return VStack(spacing: 0) {
             if finderTarget != nil { finderBanner }
             if store.settings.progressiveVocabularyStage == .start
@@ -1324,8 +1546,8 @@ struct SpeakView: View {
                                 .fontWeight(navigator.currentBoard == recentBoardName ? .bold : .regular)
                                 .accessibilityAddTraits(navigator.currentBoard == recentBoardName ? .isSelected : [])
                                 .accessibilityValue([
-                                    focusBoardContains(recentBoardName) ? "Contains focus words" : nil,
-                                    suggestedBoardContains(recentBoardName, ids: suggestedIDs) ? "Contains suggested words" : nil
+                                    indicators.focusBoards.contains(recentBoardName) ? "Contains focus words" : nil,
+                                    indicators.suggestedBoards.contains(recentBoardName) ? "Contains suggested words" : nil
                                 ].compactMap { $0 }.joined(separator: ", "))
                                 .overlay(Capsule().strokeBorder(
                                     isScanHighlighted(.board(recentBoardName)) ? scanHighlightColor : .clear,
@@ -1383,18 +1605,18 @@ struct SpeakView: View {
                                     .accessibilityValue([
                                         finderTarget?.category == name && navigator.currentBoard != name
                                             ? "Word finder next board" : nil,
-                                        focusBoardContains(name) ? "Contains focus words" : nil,
-                                        suggestedBoardContains(name, ids: suggestedIDs) ? "Contains suggested words" : nil
+                                        indicators.focusBoards.contains(name) ? "Contains focus words" : nil,
+                                        indicators.suggestedBoards.contains(name) ? "Contains suggested words" : nil
                                     ].compactMap { $0 }.joined(separator: ", "))
                                     .overlay(Capsule().strokeBorder(
                                         finderTarget?.category == name && navigator.currentBoard != name
                                             ? (store.settings.highContrast ? .black : .pink) : .clear,
                                         lineWidth: 5))
                                     .overlay(Capsule().strokeBorder(
-                                        focusBoardContains(name) ? (store.settings.highContrast ? .black : .purple) : .clear,
+                                        indicators.focusBoards.contains(name) ? (store.settings.highContrast ? .black : .purple) : .clear,
                                         lineWidth: 4))
                                     .overlay(Capsule().strokeBorder(
-                                        suggestedBoardContains(name, ids: suggestedIDs) ? (store.settings.highContrast ? .black : .teal) : .clear,
+                                        indicators.suggestedBoards.contains(name) ? (store.settings.highContrast ? .black : .teal) : .clear,
                                         lineWidth: 3))
                                     .overlay(Capsule().strokeBorder(
                                         isScanHighlighted(.board(name)) ? scanHighlightColor : .clear,
@@ -1407,14 +1629,14 @@ struct SpeakView: View {
                             }
                             .buttonStyle(.bordered)
                             .accessibilityValue([
-                                focusBoardContains("Favorites") ? "Contains focus words" : nil,
-                                suggestedBoardContains("Favorites", ids: suggestedIDs) ? "Contains suggested words" : nil
+                                indicators.focusBoards.contains("Favorites") ? "Contains focus words" : nil,
+                                indicators.suggestedBoards.contains("Favorites") ? "Contains suggested words" : nil
                             ].compactMap { $0 }.joined(separator: ", "))
                             .overlay(Capsule().strokeBorder(
-                                focusBoardContains("Favorites") ? (store.settings.highContrast ? .black : .purple) : .clear,
+                                indicators.focusBoards.contains("Favorites") ? (store.settings.highContrast ? .black : .purple) : .clear,
                                 lineWidth: 4))
                             .overlay(Capsule().strokeBorder(
-                                suggestedBoardContains("Favorites", ids: suggestedIDs) ? (store.settings.highContrast ? .black : .teal) : .clear,
+                                indicators.suggestedBoards.contains("Favorites") ? (store.settings.highContrast ? .black : .teal) : .clear,
                                 lineWidth: 3))
                             .overlay(Capsule().strokeBorder(
                                 isScanHighlighted(.board("Favorites")) ? scanHighlightColor : .clear,
@@ -1519,6 +1741,8 @@ struct SpeakView: View {
         let contentWidth = max(1, width - 24)
         let columns = max(1, Int((contentWidth + 10) / (coreTileSize.minimumWidth + 10)))
         let timeIDs = store.timeOfDayHighlightIDs(for: "Core", hour: timeHighlightHour)
+        let recentIDs = store.recentPictureHighlightIDs
+        let labelsVisible = store.boardTileLabelsVisible(for: "Core")
         return VStack(alignment: .leading, spacing: 0) {
             Label("Core", systemImage: "pin.fill")
                 .font(.headline)
@@ -1530,7 +1754,8 @@ struct SpeakView: View {
                                          count: columns), spacing: 10) {
                     ForEach(Array(persistentCoreSlots.enumerated()), id: \.offset) { entry in
                         if let item = entry.element {
-                            persistentCoreTile(item, suggestedIDs: suggestedIDs, timeOfDayIDs: timeIDs)
+                            persistentCoreTile(item, suggestedIDs: suggestedIDs, timeOfDayIDs: timeIDs,
+                                               recentIDs: recentIDs, labelsVisible: labelsVisible)
                         } else {
                             Color.clear
                                 .frame(maxWidth: .infinity, minHeight: coreTileSize.minimumTileHeight + 16)
@@ -1547,6 +1772,8 @@ struct SpeakView: View {
 
     private func persistentCoreStrip(suggestedIDs: Set<UUID>) -> some View {
         let timeIDs = store.timeOfDayHighlightIDs(for: "Core", hour: timeHighlightHour)
+        let recentIDs = store.recentPictureHighlightIDs
+        let labelsVisible = store.boardTileLabelsVisible(for: "Core")
         return VStack(alignment: .leading, spacing: 0) {
             Label("Core", systemImage: "pin.fill")
                 .font(.subheadline.weight(.semibold))
@@ -1557,7 +1784,8 @@ struct SpeakView: View {
                 LazyHStack(spacing: 8) {
                     ForEach(Array(persistentCoreSlots.enumerated()), id: \.offset) { entry in
                         if let item = entry.element {
-                            persistentCoreTile(item, suggestedIDs: suggestedIDs, timeOfDayIDs: timeIDs)
+                            persistentCoreTile(item, suggestedIDs: suggestedIDs, timeOfDayIDs: timeIDs,
+                                               recentIDs: recentIDs, labelsVisible: labelsVisible)
                                 .frame(width: coreTileSize.minimumWidth)
                         } else {
                             Color.clear
@@ -1579,7 +1807,8 @@ struct SpeakView: View {
 
     @ViewBuilder
     private func persistentCoreTile(_ item: CommunicationItem, suggestedIDs: Set<UUID>,
-                                    timeOfDayIDs: Set<UUID>) -> some View {
+                                    timeOfDayIDs: Set<UUID>, recentIDs: Set<UUID>,
+                                    labelsVisible: Bool) -> some View {
         if item.boardVisibility == .hidden {
             Color.clear
                 .frame(maxWidth: .infinity, minHeight: coreTileSize.minimumTileHeight + 16)
@@ -1591,7 +1820,7 @@ struct SpeakView: View {
                               isScanHighlighted: false,
                               isFocusHighlighted: focusedWordIDs.contains(item.id),
                               isSuggested: suggestedIDs.contains(item.id),
-                              isRecentlyUsed: store.recentPictureHighlightIDs.contains(item.id),
+                              isRecentlyUsed: recentIDs.contains(item.id),
                               isTimeOfDayHighlighted: timeOfDayIDs.contains(item.id),
                               isFinderHighlighted: finderTargetID == item.id,
                               holdDuration: store.settings.wordHoldDuration,
@@ -1600,7 +1829,7 @@ struct SpeakView: View {
                               contentOpacity: item.boardVisibility == .dimmed
                                   ? store.settings.dimmedButtonOpacity : 1,
                               displayLabel: store.displayLabel(for: item),
-                              showsLabel: store.boardTileLabelsVisible(for: "Core")) {
+                              showsLabel: labelsVisible) {
                 select(item)
             }
             .disabled(!item.isBoardSelectable(dimmedButtonsActive: store.settings.dimmedButtonsActive))
@@ -1701,6 +1930,11 @@ struct SpeakView: View {
     private func groupedPictureGrid(suggestedIDs: Set<UUID>) -> some View {
         let clusters = boardClusters
         let timeIDs = store.timeOfDayHighlightIDs(for: navigator.currentBoard, hour: timeHighlightHour)
+        let recentIDs = store.recentPictureHighlightIDs
+        let labelsVisible = store.boardTileLabelsVisible(for: navigator.currentBoard)
+        let scanHighlight = highlightedTarget
+        let scanColumns = boardColumnCount
+        let focusIDs = focusedWordIDs
         return VStack(alignment: .leading, spacing: 12) {
             if let selectedBoardCluster,
                let cluster = clusters.first(where: { $0.id == selectedBoardCluster }) {
@@ -1718,7 +1952,11 @@ struct SpeakView: View {
                                          count: horizontalSizeClass == .regular ? 3 : 2), spacing: 10) {
                     ForEach(Array(cluster.items.enumerated()), id: \.offset) { entry in
                         boardItemCell(entry.element, position: cluster.startIndex + entry.offset,
-                                      suggestedIDs: suggestedIDs, timeOfDayIDs: timeIDs, enlarged: true)
+                                      suggestedIDs: suggestedIDs, timeOfDayIDs: timeIDs,
+                                      recentIDs: recentIDs, highlightsRecent: true,
+                                      labelsVisible: labelsVisible,
+                                      scanHighlight: scanHighlight, scanColumns: scanColumns,
+                                      focusIDs: focusIDs, enlarged: true)
                     }
                 }
             } else {
@@ -1753,10 +1991,11 @@ struct SpeakView: View {
                 LazyVGrid(columns: [GridItem(.flexible(), spacing: 4), GridItem(.flexible(), spacing: 4)], spacing: 4) {
                     ForEach(available.prefix(6)) { item in
                         VStack(spacing: 1) {
-                            if let data = item.imageData, let image = UIImage(data: data) {
-                                Image(uiImage: image)
-                                    .resizable()
-                                    .scaledToFill()
+                            if let data = item.imageData {
+                                AsyncThumbnailImage(data: data) {
+                                    Text(item.symbol)
+                                        .font(.system(size: 25))
+                                }
                                     .frame(height: 29)
                                     .clipped()
                                     .clipShape(RoundedRectangle(cornerRadius: 4))
@@ -1808,17 +2047,26 @@ struct SpeakView: View {
     @ViewBuilder
     private func boardItemCell(_ item: CommunicationItem, position: Int,
                                suggestedIDs: Set<UUID>, timeOfDayIDs: Set<UUID>,
+                               recentIDs: Set<UUID>, highlightsRecent: Bool, labelsVisible: Bool,
+                               scanHighlight: ScanTarget?, scanColumns: Int, focusIDs: Set<UUID>,
                                enlarged: Bool = false) -> some View {
         if item.boardVisibility == .hidden {
-            hiddenBoardSlot(position: position, enlarged: enlarged)
+            hiddenBoardSlot(position: position, scanHighlight: scanHighlight,
+                            scanColumns: scanColumns, enlarged: enlarged)
                 .id("scan-word-\(item.id)")
         } else if store.settings.wordHoldDuration > 0 || store.isBoardOnlyModeActive {
             wordTile(item, position: position, suggestedIDs: suggestedIDs,
-                     timeOfDayIDs: timeOfDayIDs, enlarged: enlarged)
+                     timeOfDayIDs: timeOfDayIDs, recentIDs: recentIDs,
+                     highlightsRecent: highlightsRecent, labelsVisible: labelsVisible,
+                     scanHighlight: scanHighlight,
+                     scanColumns: scanColumns, focusIDs: focusIDs, enlarged: enlarged)
                 .id("scan-word-\(item.id)")
         } else {
             wordTile(item, position: position, suggestedIDs: suggestedIDs,
-                     timeOfDayIDs: timeOfDayIDs, enlarged: enlarged)
+                     timeOfDayIDs: timeOfDayIDs, recentIDs: recentIDs,
+                     highlightsRecent: highlightsRecent, labelsVisible: labelsVisible,
+                     scanHighlight: scanHighlight,
+                     scanColumns: scanColumns, focusIDs: focusIDs, enlarged: enlarged)
                 .contextMenu {
                     Button(item.isFavorite ? "Remove favorite" : "Add favorite",
                            systemImage: item.isFavorite ? "star.slash" : "star") {
@@ -1850,11 +2098,7 @@ struct SpeakView: View {
 
     private var typedSentenceSuggestions: [String] {
         guard typedCursorOffset == store.typedMessage.count else { return [] }
-        return SentencePrediction.suggestions(for: store.typedMessage, phrases: store.phrases,
-                                              quickResponses: store.settings.quickResponses,
-                                              history: store.settings.saveHistory ? store.history : [],
-                                              learned: store.settings.learnPrediction ? store.learnedPrediction : nil,
-                                              language: store.settings.communicationLanguage)
+        return store.sentenceSuggestions()
     }
 
     private func setTypedMessageAndCaret(_ text: String) {
@@ -1888,7 +2132,7 @@ struct SpeakView: View {
                 previous, current in
                 store.previewTypedSpeech(previous: previous, current: current)
             }
-                .id(store.activeConversationID)
+                .id(store.isPrivateConversationActive ? "private" : store.activeConversationID.uuidString)
                 .frame(minHeight: 180, maxHeight: 300)
                 .padding(8)
                 .background(.white, in: RoundedRectangle(cornerRadius: 14))
@@ -1948,11 +2192,7 @@ struct SpeakView: View {
                 .accessibilityLabel("Phrase shortcuts")
             }
             let sentenceSuggestions = typedSentenceSuggestions
-            let suggestions = WordPrediction.suggestions(
-                for: store.typedMessage, items: store.localizedItems(excludingPredictionKeys: true), phrases: store.phrases,
-                history: store.settings.saveHistory ? store.history : [],
-                learned: store.settings.learnPrediction ? store.learnedPrediction : nil,
-                language: store.settings.communicationLanguage)
+            let suggestions = store.wordSuggestions()
             let trailingEmoji = typedCursorOffset == store.typedMessage.count
                 ? EmojiWordPrediction.trailingEmoji(in: store.typedMessage) : nil
             let emojiWords = trailingEmoji == nil ? [] : EmojiWordPrediction.suggestions(
@@ -2055,9 +2295,11 @@ struct SpeakView: View {
                         Button("Show large message", systemImage: "rectangle.expand.vertical") { showingTypedMessage = true }
                         ShareLink(item: store.typedMessage) { Label("Share", systemImage: "square.and.arrow.up") }
                         if !nearby.connectedPeers.isEmpty {
-                            Button("Send nearby", systemImage: "bubble.left.and.bubble.right") {
+                            Button(isSendingNearby ? "Sending…" : "Send nearby",
+                                   systemImage: "bubble.left.and.bubble.right") {
                                 sendNearby(store.typedMessage)
                             }
+                            .disabled(isSendingNearby)
                         }
                         Button("Share audio", systemImage: "waveform") {
                             prepareAudioShare(store.typedMessage, isPictureMessage: false)
@@ -2094,10 +2336,15 @@ struct SpeakView: View {
     }
 
     private func sendNearby(_ text: String, pictureTokens: [PictureMessageToken] = []) {
-        do { try nearby.send(text, pictureTokens: pictureTokens) }
-        catch {
-            nearbySendError = error.localizedDescription
-            showingNearbySendError = true
+        guard !isSendingNearby else { return }
+        isSendingNearby = true
+        Task {
+            defer { isSendingNearby = false }
+            do { try await nearby.send(text, pictureTokens: pictureTokens) }
+            catch {
+                nearbySendError = error.localizedDescription
+                showingNearbySendError = true
+            }
         }
     }
 
@@ -2105,27 +2352,22 @@ struct SpeakView: View {
         store.settings.scanEnabled && highlightedTarget == target
     }
 
-    private func isScanLineHighlighted(at position: Int) -> Bool {
-        guard store.settings.scanEnabled,
-              case .line(let axis, let index) = highlightedTarget else { return false }
-        return axis == .row
-            ? position / max(1, boardColumnCount) == index
-            : position % max(1, boardColumnCount) == index
-    }
-
     private func wordTile(_ item: CommunicationItem, position: Int, suggestedIDs: Set<UUID>,
-                          timeOfDayIDs: Set<UUID>, enlarged: Bool = false) -> some View {
+                          timeOfDayIDs: Set<UUID>, recentIDs: Set<UUID>,
+                          highlightsRecent: Bool, labelsVisible: Bool,
+                          scanHighlight: ScanTarget?, scanColumns: Int,
+                          focusIDs: Set<UUID>, enlarged: Bool = false) -> some View {
         let unavailablePrediction = item.effectiveAction == .completeTypedPrediction
             && store.typedPrediction(for: item) == nil
         return CommunicationTile(item: item, size: enlarged ? .large : effectiveTileSize,
                           highContrast: store.settings.highContrast,
                           grammarColorScheme: store.settings.grammarColorScheme,
-                          isScanHighlighted: isScanHighlighted(.word(item.id, store.displayLabel(for: item)))
-                              || isScanLineHighlighted(at: position),
-                          isFocusHighlighted: focusedWordIDs.contains(item.id),
+                          isScanHighlighted: scanHighlight?.highlightsWord(id: item.id,
+                                                                            position: position,
+                                                                            columns: scanColumns) == true,
+                          isFocusHighlighted: focusIDs.contains(item.id),
                           isSuggested: suggestedIDs.contains(item.id),
-                          isRecentlyUsed: search.isEmpty && store.categories.contains(navigator.currentBoard)
-                              && store.recentPictureHighlightIDs.contains(item.id),
+                          isRecentlyUsed: highlightsRecent && recentIDs.contains(item.id),
                           isTimeOfDayHighlighted: search.isEmpty && timeOfDayIDs.contains(item.id),
                           isFinderHighlighted: finderTargetID == item.id,
                           holdDuration: store.settings.wordHoldDuration,
@@ -2135,7 +2377,7 @@ struct SpeakView: View {
                           contentOpacity: unavailablePrediction ? 0.42 : item.boardVisibility == .dimmed
                               ? store.settings.dimmedButtonOpacity : 1,
                           displayLabel: store.displayLabel(for: item),
-                          showsLabel: !search.isEmpty || store.boardTileLabelsVisible(for: navigator.currentBoard)) {
+                          showsLabel: labelsVisible) {
                 select(item)
             }
             .disabled(unavailablePrediction
@@ -2144,12 +2386,14 @@ struct SpeakView: View {
                 ? "board-key-\(item.label)" : "")
     }
 
-    private func hiddenBoardSlot(position: Int, enlarged: Bool = false) -> some View {
+    private func hiddenBoardSlot(position: Int, scanHighlight: ScanTarget?, scanColumns: Int,
+                                 enlarged: Bool = false) -> some View {
         RoundedRectangle(cornerRadius: 16)
             .fill(.clear)
             .frame(maxWidth: .infinity, minHeight: (enlarged ? TileSize.large : effectiveTileSize).minimumTileHeight + 16)
             .overlay(RoundedRectangle(cornerRadius: 16).strokeBorder(
-                isScanLineHighlighted(at: position) ? scanHighlightColor : .clear, lineWidth: 5))
+                scanHighlight?.highlightsLine(position: position, columns: scanColumns) == true
+                    ? scanHighlightColor : .clear, lineWidth: 5))
             .accessibilityHidden(true)
     }
 

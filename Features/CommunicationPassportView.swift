@@ -5,6 +5,7 @@ struct CommunicationPassportView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var draft = CommunicationPassport()
     @State private var isEditing = false
+    @State private var passportPDF: PDFPreviewPayload?
 
     var body: some View {
         NavigationStack {
@@ -25,6 +26,11 @@ struct CommunicationPassportView: View {
                         ShareLink(item: store.passport.shareText) {
                             Label("Share my passport", systemImage: "square.and.arrow.up")
                         }
+                        Button("Printable passport PDF", systemImage: "doc.richtext") {
+                            passportPDF = PDFPreviewPayload(data: PrintablePassportPDF.makeData(
+                                passport: store.passport))
+                        }
+                        .accessibilityIdentifier("passport-pdf")
                     }
                     ForEach(store.passport.entries.indices, id: \.self) { index in
                         let entry = store.passport.entries[index]
@@ -60,6 +66,11 @@ struct CommunicationPassportView: View {
             .onChange(of: store.activeProfileID) { _, _ in
                 draft = store.passport
                 isEditing = false
+                passportPDF = nil
+            }
+            .sheet(item: $passportPDF) { payload in
+                PrintableBoardsPreview(data: payload.data, title: "Passport PDF",
+                                       filename: "Open Voice Communication Passport")
             }
         }
     }

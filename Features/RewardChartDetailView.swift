@@ -8,6 +8,7 @@ struct RewardChartDetailView: View {
     @State private var showingReset = false
     @State private var showingDelete = false
     @State private var showingCollected = false
+    @State private var chartPDF: PDFPreviewPayload?
 
     private var chart: RewardChart? {
         store.rewardCharts.first { $0.id == chartID }
@@ -81,6 +82,14 @@ struct RewardChartDetailView: View {
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             if chart != nil {
+                Button("Printable chart PDF", systemImage: "printer") {
+                    if let chart {
+                        chartPDF = PDFPreviewPayload(data: PrintableRewardChartPDF.makeData(
+                            chart: chart, profileName: store.activeProfileName,
+                            language: store.settings.communicationLanguage))
+                    }
+                }
+                .accessibilityIdentifier("reward-print-chart")
                 Button("Edit chart", systemImage: "pencil") { showingEditor = true }
                     .accessibilityIdentifier("reward-edit")
                 Menu("More chart options", systemImage: "ellipsis.circle") {
@@ -100,6 +109,10 @@ struct RewardChartDetailView: View {
         }
         .sheet(isPresented: $showingEditor) {
             if let chart { RewardChartEditorView(chart: chart) }
+        }
+        .sheet(item: $chartPDF) { payload in
+            PrintableBoardsPreview(data: payload.data, title: "Reward chart PDF",
+                                   filename: "Open Voice Reward Chart")
         }
         .alert("Reward collected", isPresented: $showingCollected) {
             Button("OK", role: .cancel) {}
@@ -137,10 +150,11 @@ struct RewardChartDetailView: View {
 
     @ViewBuilder
     private func rewardPicture(_ chart: RewardChart) -> some View {
-        if let data = chart.photoData, let image = UIImage(data: data) {
-            Image(uiImage: image)
-                .resizable()
-                .scaledToFit()
+        if let data = chart.photoData {
+            AsyncThumbnailImage(data: data, maxPixelSize: 500, contentMode: .fit) {
+                Text(chart.symbol)
+                    .font(.system(size: 72))
+            }
                 .frame(maxHeight: 200)
                 .clipShape(RoundedRectangle(cornerRadius: 16))
                 .accessibilityLabel("Reward photo")

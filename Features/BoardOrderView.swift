@@ -9,6 +9,7 @@ struct BoardOrderView: View {
     @State private var isSelectingForSort = false
     @State private var selectedSortIDs: Set<UUID> = []
     @State private var selectedSwapID: UUID?
+    @State private var transferError: String?
     @State private var swapPage = 0
     @State private var previewAvailableWidth: CGFloat = 300
     private let boardAvailableWidth: CGFloat
@@ -190,6 +191,7 @@ struct BoardOrderView: View {
                                 .buttonStyle(.borderless)
                                 .disabled(index == boardItems.count - 1)
                                 .accessibilityIdentifier("move-down-\(item.label)")
+                                transferButton(for: item)
                             }
                         }
                     }
@@ -262,7 +264,42 @@ struct BoardOrderView: View {
                 selectedSwapID = nil
                 endSortSelection()
             }
+            .alert("Could not transfer button", isPresented: Binding(
+                get: { transferError != nil }, set: { if !$0 { transferError = nil } }
+            )) {
+                Button("OK") { transferError = nil }
+            } message: {
+                Text(transferError ?? "")
+            }
         }
+    }
+
+    private func transferButton(for item: CommunicationItem) -> some View {
+        Menu {
+            Menu("Copy to board", systemImage: "plus.square.on.square") {
+                ForEach(store.categories, id: \.self) { board in
+                    Button(board) {
+                        if store.copyItem(item.id, to: board) == nil {
+                            transferError = "This button cannot be copied to \(board) because its link would point to the same board."
+                        }
+                    }
+                }
+            }
+            Menu("Move to board", systemImage: "arrow.right.square") {
+                ForEach(store.categories.filter { $0 != selectedBoard }, id: \.self) { board in
+                    Button(board) {
+                        if !store.moveItem(item.id, to: board) {
+                            transferError = "This button cannot be moved to \(board) because its link would point to the same board."
+                        }
+                    }
+                }
+            }
+        } label: {
+            Label("Transfer \(item.label)", systemImage: "square.on.square")
+        }
+        .labelStyle(.iconOnly)
+        .buttonStyle(.borderless)
+        .accessibilityIdentifier("transfer-\(item.label)")
     }
 
     private func swapCell(_ item: CommunicationItem, position: Int) -> some View {

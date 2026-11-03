@@ -33,10 +33,10 @@ struct RoutineStepTimerView: View {
             if let step {
                 ScrollView {
                     VStack(spacing: 24) {
-                        if let imageData = step.displayImageData, let image = UIImage(data: imageData) {
-                            Image(uiImage: image)
-                                .resizable()
-                                .scaledToFit()
+                        if let imageData = step.displayImageData {
+                            AsyncThumbnailImage(data: imageData, maxPixelSize: 400, contentMode: .fit) {
+                                Text(step.symbol).font(.system(size: 90))
+                            }
                                 .frame(maxWidth: 180, maxHeight: 180)
                                 .accessibilityHidden(true)
                         } else {

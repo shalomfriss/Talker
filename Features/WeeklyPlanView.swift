@@ -235,6 +235,7 @@ struct WeeklyPlanView: View {
         let option = activity.option.resolved(using: store.items)
         let item = option.communicationItem
         let done = activity.isComplete(on: selectedDate)
+        let rewardChart = store.rewardCharts.first(where: { $0.id == activity.rewardChartID })
         return HStack(spacing: 12) {
             Button {
                 store.select(item)
@@ -243,10 +244,10 @@ struct WeeklyPlanView: View {
                 }
             } label: {
                 HStack(spacing: 12) {
-                    if let data = option.imageData, let image = UIImage(data: data) {
-                        Image(uiImage: image)
-                            .resizable()
-                            .scaledToFill()
+                    if let data = option.imageData {
+                        AsyncThumbnailImage(data: data) {
+                            Text(option.symbol).font(.largeTitle)
+                        }
                             .frame(width: 56, height: 56)
                             .clipShape(RoundedRectangle(cornerRadius: 10))
                             .accessibilityHidden(true)
@@ -255,9 +256,16 @@ struct WeeklyPlanView: View {
                             .frame(width: 56, height: 56)
                             .accessibilityHidden(true)
                     }
-                    Text(store.displayLabel(for: item))
-                        .font(.headline)
-                        .foregroundStyle(.primary)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(store.displayLabel(for: item))
+                            .font(.headline)
+                            .foregroundStyle(.primary)
+                        if let rewardChart {
+                            Label(rewardChart.title, systemImage: "star.fill")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
                     Spacer(minLength: 0)
                 }
                 .contentShape(Rectangle())

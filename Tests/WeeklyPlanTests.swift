@@ -120,6 +120,96 @@ final class WeeklyPlanTests: XCTestCase {
     }
 
     @MainActor
+    func testLinkedWeeklyActivityAwardsOncePerDateAndSurvivesBackup() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let file = directory.appendingPathComponent("source.json")
+        let store = CommunicationStore(storageURL: file)
+        let chart = try XCTUnwrap(store.addRewardChart(title: "Practice", reward: "Choose music",
+                                                       targetTokens: 2))
+        let activity = WeeklyActivity(option: ChoiceOption(label: "Try a new word"),
+                                      rewardChartID: chart.id)
+        XCTAssertTrue(store.addWeeklyActivity(activity, on: 2))
+        let calendar = Calendar(identifier: .gregorian)
+        let monday = try XCTUnwrap(calendar.date(from: DateComponents(year: 2026, month: 11, day: 2)))
+        let nextMonday = try XCTUnwrap(calendar.date(byAdding: .day, value: 7, to: monday))
+        let thirdMonday = try XCTUnwrap(calendar.date(byAdding: .day, value: 14, to: monday))
+
+        store.toggleWeeklyActivity(id: activity.id, on: 2, date: monday)
+        XCTAssertEqual(store.rewardCharts.first?.earnedTokens, 1)
+        store.toggleWeeklyActivity(id: activity.id, on: 2, date: monday)
+        store.toggleWeeklyActivity(id: activity.id, on: 2, date: monday)
+        XCTAssertEqual(store.rewardCharts.first?.earnedTokens, 1)
+        store.toggleWeeklyActivity(id: activity.id, on: 2, date: nextMonday)
+        XCTAssertEqual(store.rewardCharts.first?.earnedTokens, 2)
+        store.toggleWeeklyActivity(id: activity.id, on: 2, date: thirdMonday)
+        XCTAssertEqual(store.rewardCharts.first?.earnedTokens, 2)
+        XCTAssertFalse(try XCTUnwrap(store.weeklyPlan.activities(on: 2).first)
+            .hasEarnedReward(on: thirdMonday))
+
+        let relaunched = CommunicationStore(storageURL: file)
+        XCTAssertEqual(relaunched.rewardCharts.first?.earnedTokens, 2)
+        XCTAssertTrue(try XCTUnwrap(relaunched.weeklyPlan.activities(on: 2).first)
+            .hasEarnedReward(on: monday))
+        let restored = CommunicationStore(storageURL: directory.appendingPathComponent("restored.json"))
+        try restored.importBackup(store.backupData())
+        XCTAssertEqual(restored.rewardCharts.first?.earnedTokens, 2)
+        XCTAssertTrue(try XCTUnwrap(restored.weeklyPlan.activities(on: 2).first)
+            .hasEarnedReward(on: nextMonday))
+
+        XCTAssertTrue(store.startRewardChartAgain(id: chart.id))
+        store.toggleWeeklyActivity(id: activity.id, on: 2, date: thirdMonday)
+        store.toggleWeeklyActivity(id: activity.id, on: 2, date: thirdMonday)
+        XCTAssertEqual(store.rewardCharts.first?.earnedTokens, 1)
+    }
+
+    @MainActor
+    func testWeeklyRewardLinksFollowCopiesAndTemplatesAndClearOnChartDeletion() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = CommunicationStore(storageURL: directory.appendingPathComponent("source.json"))
+        let chart = try XCTUnwrap(store.addRewardChart(title: "Morning", reward: "Play outside"))
+        let activity = WeeklyActivity(option: ChoiceOption(label: "Get ready"), rewardChartID: chart.id)
+        XCTAssertTrue(store.addWeeklyActivity(activity, on: 2))
+        XCTAssertTrue(store.copyWeeklyDay(from: 2, to: 3))
+        let copied = try XCTUnwrap(store.weeklyPlan.activities(on: 3).first)
+        XCTAssertEqual(copied.rewardChartID, chart.id)
+        XCTAssertNil(copied.rewardedDates)
+        XCTAssertTrue(store.saveWeeklyTemplate(title: "Morning plan", from: 2))
+        let template = try XCTUnwrap(store.weeklyPlan.templates.first)
+        XCTAssertEqual(template.rewardChartIDs, [chart.id])
+        XCTAssertTrue(store.applyWeeklyTemplate(id: template.id, to: 4))
+        XCTAssertEqual(store.weeklyPlan.activities(on: 4).first?.rewardChartID, chart.id)
+        XCTAssertTrue(store.deleteRewardChart(id: chart.id))
+        XCTAssertNil(store.weeklyPlan.activities(on: 2).first?.rewardChartID)
+        XCTAssertNil(store.weeklyPlan.activities(on: 3).first?.rewardChartID)
+        XCTAssertNil(store.weeklyPlan.activities(on: 4).first?.rewardChartID)
+        XCTAssertEqual(store.weeklyPlan.templates.first?.rewardChartIDs, [nil])
+    }
+
+    func testOlderWeeklyRewardRecordsDecodeWithoutLinks() throws {
+        let chartID = UUID()
+        let activity = WeeklyActivity(option: ChoiceOption(label: "Library"), rewardChartID: chartID)
+        let template = WeeklyPlanTemplate(title: "Library day", options: [activity.option],
+                                          rewardChartIDs: [chartID])
+        var activityObject = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(activity))
+                                           as? [String: Any])
+        activityObject.removeValue(forKey: "rewardChartID")
+        activityObject.removeValue(forKey: "rewardedDates")
+        let oldActivity = try JSONDecoder().decode(WeeklyActivity.self,
+            from: JSONSerialization.data(withJSONObject: activityObject))
+        XCTAssertNil(oldActivity.rewardChartID)
+        XCTAssertNil(oldActivity.rewardedDates)
+
+        var templateObject = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(template))
+                                           as? [String: Any])
+        templateObject.removeValue(forKey: "rewardChartIDs")
+        let oldTemplate = try JSONDecoder().decode(WeeklyPlanTemplate.self,
+            from: JSONSerialization.data(withJSONObject: templateObject))
+        XCTAssertTrue(oldTemplate.rewardChartIDs.isEmpty)
+    }
+
+    @MainActor
     func testWeeklyPlanStaysWithProfileAndSurvivesBackup() throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }

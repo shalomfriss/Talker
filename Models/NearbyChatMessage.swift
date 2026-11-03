@@ -1,7 +1,6 @@
 import Foundation
-import UIKit
 
-struct NearbyChatToken: Codable, Equatable, Identifiable {
+struct NearbyChatToken: Codable, Equatable, Identifiable, Sendable {
     let id: UUID
     let text: String
     let symbol: String?
@@ -14,27 +13,19 @@ struct NearbyChatToken: Codable, Equatable, Identifiable {
         self.imageData = imageData
     }
 
-    @MainActor
-    init(_ token: PictureMessageToken) {
-        id = UUID()
-        text = token.text
-        symbol = token.symbol
-        if let data = token.imageData, let image = UIImage(data: data) {
-            let scale = min(1, 128 / max(image.size.width, image.size.height))
-            let size = CGSize(width: max(1, image.size.width * scale),
-                              height: max(1, image.size.height * scale))
-            let format = UIGraphicsImageRendererFormat()
-            format.scale = 1
-            imageData = UIGraphicsImageRenderer(size: size, format: format).jpegData(withCompressionQuality: 0.65) { _ in
-                image.draw(in: CGRect(origin: .zero, size: size))
-            }
+    static func prepared(from token: PictureMessageToken) async -> NearbyChatToken {
+        let imageData: Data?
+        if let data = token.imageData {
+            imageData = await PhotoProcessing.preparedDataAsync(from: data, maxPixelSize: 128,
+                                                                 jpegQuality: 0.65)
         } else {
             imageData = nil
         }
+        return NearbyChatToken(text: token.text, symbol: token.symbol, imageData: imageData)
     }
 }
 
-struct NearbyChatMessage: Codable, Equatable, Identifiable {
+struct NearbyChatMessage: Codable, Equatable, Identifiable, Sendable {
     let id: UUID
     let date: Date
     let peerName: String
@@ -55,7 +46,7 @@ struct NearbyChatMessage: Codable, Equatable, Identifiable {
     }
 }
 
-struct NearbyChatPacket: Codable {
+struct NearbyChatPacket: Codable, Sendable {
     let version: Int
     let id: UUID
     let date: Date
@@ -75,6 +66,12 @@ struct NearbyChatPacket: Codable {
         let data = try JSONEncoder().encode(self)
         guard data.count <= 2_000_000 else { throw NearbyChatError.messageTooLarge }
         return data
+    }
+
+    func encodedAsync() async throws -> Data {
+        try await Task.detached(priority: .userInitiated) { @Sendable in
+            try encoded()
+        }.value
     }
 
     static func decode(_ data: Data) throws -> NearbyChatPacket {

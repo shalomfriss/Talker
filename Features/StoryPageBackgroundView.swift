@@ -22,11 +22,11 @@ struct StoryPageBackgroundView: View {
                                         Color(red: 0.99, green: 0.83, blue: 0.87)],
                                startPoint: .topLeading, endPoint: .bottomTrailing)
             case .photo:
-                if let photoData, let image = UIImage(data: photoData) {
+                if let photoData {
                     GeometryReader { geometry in
-                        Image(uiImage: image)
-                            .resizable()
-                            .scaledToFill()
+                        AsyncThumbnailImage(data: photoData, maxPixelSize: 1000) {
+                            Color.white
+                        }
                             .frame(width: geometry.size.width, height: geometry.size.height)
                             .clipped()
                     }

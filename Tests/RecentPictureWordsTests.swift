@@ -36,13 +36,20 @@ final class RecentPictureWordsTests: XCTestCase {
         let selected = Array(words.prefix(3))
         let originalOrder = store.items.filter { $0.category == "Core" }.map(\.id)
         store.settings.highlightWordsForTimeOfDay = true
-        store.settings.timeOfDayWordUses = [
+        let rankedUses = [
             TimeOfDayWordUse(itemID: selected[0].id, counts: [2, 0, 0, 0]),
             TimeOfDayWordUse(itemID: selected[1].id, counts: [3, 0, 0, 0]),
             TimeOfDayWordUse(itemID: selected[2].id, counts: [4, 0, 0, 0])
         ]
+        store.settings.timeOfDayWordUses = rankedUses
         XCTAssertEqual(store.timeOfDayHighlightIDs(for: "Core", hour: 8),
                        Set([selected[1].id, selected[2].id]))
+        store.settings.timeOfDayWordUses = selected.map {
+            TimeOfDayWordUse(itemID: $0.id, counts: [3, 0, 0, 0])
+        }
+        XCTAssertEqual(store.timeOfDayHighlightIDs(for: "Core", hour: 8),
+                       Set([selected[0].id, selected[1].id]))
+        store.settings.timeOfDayWordUses = rankedUses
         XCTAssertTrue(store.timeOfDayHighlightIDs(for: "Core", hour: 14).isEmpty)
         XCTAssertTrue(store.timeOfDayHighlightIDs(for: "Food", hour: 8).isEmpty)
         XCTAssertEqual(store.items.filter { $0.category == "Core" }.map(\.id), originalOrder)

@@ -10,6 +10,7 @@ struct NearbyChatView: View {
     @State private var showingError = false
     @State private var errorText = ""
     @State private var selectedRecipient: MCPeerID?
+    @State private var isSending = false
 
     private var messages: [NearbyChatMessage] {
         let saved = store.nearbyMessages
@@ -153,26 +154,28 @@ struct NearbyChatView: View {
                     .textFieldStyle(.roundedBorder)
                     .accessibilityIdentifier("nearby-reply")
                 Button("Send", systemImage: "arrow.up.circle.fill") {
-                    send(reply)
-                    reply = ""
+                    send(reply, clearReplyOnSuccess: true)
                 }
                 .buttonStyle(.borderedProminent)
-                .disabled(nearby.connectedPeers.isEmpty || reply.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                .disabled(isSending || nearby.connectedPeers.isEmpty ||
+                          reply.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 .accessibilityIdentifier("nearby-send-reply")
             }
             HStack {
                 Button("Send picture message", systemImage: "square.grid.2x2") {
                     send(store.composedMessage, pictureTokens: store.pictureMessageTokens)
                 }
-                .disabled(nearby.connectedPeers.isEmpty || store.composedMessage.isEmpty)
+                .disabled(isSending || nearby.connectedPeers.isEmpty || store.composedMessage.isEmpty)
                 .accessibilityIdentifier("nearby-send-picture")
                 Button("Send typed message", systemImage: "text.bubble") {
                     send(store.typedMessage)
                 }
-                .disabled(nearby.connectedPeers.isEmpty || store.typedMessage.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                .disabled(isSending || nearby.connectedPeers.isEmpty ||
+                          store.typedMessage.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 .accessibilityIdentifier("nearby-send-typed")
             }
             .buttonStyle(.bordered)
+            if isSending { ProgressView("Sending…") }
         }
         .padding()
     }
@@ -189,8 +192,10 @@ struct NearbyChatView: View {
                         HStack(spacing: 8) {
                             ForEach(message.tokens) { token in
                                 VStack(spacing: 4) {
-                                    if let data = token.imageData, let photo = UIImage(data: data) {
-                                        Image(uiImage: photo).resizable().scaledToFit()
+                                    if let data = token.imageData {
+                                        AsyncThumbnailImage(data: data, maxPixelSize: 120, contentMode: .fit) {
+                                            Text(token.symbol ?? "💬").font(.largeTitle)
+                                        }
                                             .frame(width: 58, height: 58)
                                     } else {
                                         Text(token.symbol ?? "💬").font(.largeTitle)
@@ -217,9 +222,18 @@ struct NearbyChatView: View {
         .accessibilityIdentifier("nearby-message-\(message.id.uuidString)")
     }
 
-    private func send(_ text: String, pictureTokens: [PictureMessageToken] = []) {
-        do { try nearby.send(text, pictureTokens: pictureTokens, to: selectedRecipient) }
-        catch { present(error.localizedDescription) }
+    private func send(_ text: String, pictureTokens: [PictureMessageToken] = [],
+                      clearReplyOnSuccess: Bool = false) {
+        guard !isSending else { return }
+        isSending = true
+        let recipient = selectedRecipient
+        Task {
+            defer { isSending = false }
+            do {
+                try await nearby.send(text, pictureTokens: pictureTokens, to: recipient)
+                if clearReplyOnSuccess && reply == text { reply = "" }
+            } catch { present(error.localizedDescription) }
+        }
     }
 
     private func present(_ error: String) {

@@ -3,6 +3,7 @@ import Foundation
 struct FirstThenSession {
     let steps: [RoutineStep]
     private(set) var completedStepIDs: Set<UUID> = []
+    private(set) var rewardedStepIDs: Set<UUID> = []
 
     init(template: RoutineTemplate) {
         steps = template.freshSteps()
@@ -38,6 +39,15 @@ struct FirstThenSession {
         completedStepIDs.contains(step.id)
     }
 
+    func wasRewarded(_ step: RoutineStep) -> Bool {
+        rewardedStepIDs.contains(step.id)
+    }
+
+    mutating func markRewarded(_ step: RoutineStep) {
+        guard completedStepIDs.contains(step.id) else { return }
+        rewardedStepIDs.insert(step.id)
+    }
+
     @discardableResult
     mutating func setComplete(_ stepID: UUID, to isComplete: Bool) -> Bool {
         guard steps.contains(where: { $0.id == stepID }) else { return false }
@@ -53,5 +63,6 @@ struct FirstThenSession {
 
     mutating func reset() {
         completedStepIDs.removeAll()
+        rewardedStepIDs.removeAll()
     }
 }

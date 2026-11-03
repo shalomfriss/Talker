@@ -4,8 +4,10 @@ import UniformTypeIdentifiers
 
 struct PhraseTextEditorView: View {
     @EnvironmentObject private var store: CommunicationStore
+    @ObservedObject private var voiceCatalog = SpeechVoiceCatalog.shared
     @Environment(\.dismiss) private var dismiss
     @State private var editedText: String
+    @State private var pastingPhoto = false
     @State private var editedLabel: String
     @State private var shortcut: String
     @State private var languageCode: String?
@@ -66,11 +68,11 @@ struct PhraseTextEditorView: View {
                     Picker("Speak this phrase with", selection: $languageCode) {
                         Text("Use current voice").tag(String?.none)
                         if let languageCode,
-                           !PhraseLanguage.availableCodes.contains(languageCode) {
+                           !PhraseLanguage.codes(from: voiceCatalog.voices).contains(languageCode) {
                             Text("Unavailable on this device (\(languageCode))")
                                 .tag(Optional(languageCode))
                         }
-                        ForEach(PhraseLanguage.availableCodes, id: \.self) { code in
+                        ForEach(PhraseLanguage.codes(from: voiceCatalog.voices), id: \.self) { code in
                             Text(PhraseLanguage.title(for: code))
                                 .tag(Optional(code))
                                 .accessibilityIdentifier("phrase-language-\(code)")
@@ -121,10 +123,10 @@ struct PhraseTextEditorView: View {
                         .foregroundStyle(.secondary)
                 }
                 Section("Picture cue") {
-                    if let imageData, let image = UIImage(data: imageData) {
-                        Image(uiImage: image)
-                            .resizable()
-                            .scaledToFill()
+                    if let imageData {
+                        AsyncThumbnailImage(data: imageData, maxPixelSize: 240) {
+                            Color(uiColor: .secondarySystemBackground)
+                        }
                             .frame(width: 104, height: 104)
                             .clipShape(RoundedRectangle(cornerRadius: 12))
                             .accessibilityLabel("Phrase picture")
@@ -140,6 +142,11 @@ struct PhraseTextEditorView: View {
                                 Label("Photos", systemImage: "photo")
                             }
                             .accessibilityIdentifier("phrase-picture-photos")
+                            PictureLibraryPickerButton(title: "Picture library",
+                                                       identifier: "phrase-picture-library") { picture in
+                                imageData = picture.imageData
+                                arasaacPictogramID = nil
+                            }
                             Button("Files", systemImage: "folder") { showingImageImporter = true }
                                 .accessibilityIdentifier("phrase-picture-files")
                             Button("ARASAAC", systemImage: "magnifyingglass") {
@@ -147,6 +154,10 @@ struct PhraseTextEditorView: View {
                             }
                             .accessibilityIdentifier("phrase-picture-arasaac")
                             CameraPhotoButton {
+                                imageData = $0
+                                arasaacPictogramID = nil
+                            }
+                            PastePhotoButton(identifier: "phrase-picture-paste", onPastingChange: { pastingPhoto = $0 }) {
                                 imageData = $0
                                 arasaacPictogramID = nil
                             }
@@ -227,7 +238,7 @@ struct PhraseTextEditorView: View {
                             } else { errorText = "Could not save this phrase. Choose a current folder and a readable picture or color." }
                         } else { errorText = "Use a unique phrase, a card label up to 40 characters, and a unique shortcut of 2 to 12 letters or numbers." }
                     }
-                    .disabled(editedText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    .disabled(editedText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || pastingPhoto)
                 }
             }
         }
@@ -242,10 +253,10 @@ struct PhraseTextEditorView: View {
         .fileImporter(isPresented: $showingImageImporter, allowedContentTypes: [.image]) { result in
             switch result {
             case .success(let url):
-                let access = url.startAccessingSecurityScopedResource()
-                defer { if access { url.stopAccessingSecurityScopedResource() } }
-                do { useImageData(try Data(contentsOf: url)) }
-                catch { photoError = error.localizedDescription }
+                Task {
+                    do { useImageData(try await PhotoProcessing.preparedDataAsync(fromFile: url)) }
+                    catch { photoError = error.localizedDescription }
+                }
             case .failure(let error):
                 if (error as NSError).code != NSUserCancelledError { photoError = error.localizedDescription }
             }
@@ -257,7 +268,7 @@ struct PhraseTextEditorView: View {
                     guard let data = try await selected.loadTransferable(type: Data.self) else {
                         throw ReadAloudDocumentError.unreadableFile
                     }
-                    useImageData(data)
+                    useImageData(await PhotoProcessing.preparedDataAsync(from: data))
                 } catch { photoError = error.localizedDescription }
                 selectedPhoto = nil
             }
@@ -266,6 +277,7 @@ struct PhraseTextEditorView: View {
             get: { photoError != nil }, set: { if !$0 { photoError = nil } }
         )) { Button("OK") { photoError = nil } } message: { Text(photoError ?? "") }
         .onChange(of: store.activeProfileID) { _, _ in dismiss() }
+        .onAppear { voiceCatalog.refresh() }
     }
 
     private static let colorChoices: [(name: String, hex: String)] = [
@@ -273,8 +285,8 @@ struct PhraseTextEditorView: View {
         ("Peach", "#FFE7D3"), ("Rose", "#FFE1EA"), ("Yellow", "#FFF1C8")
     ]
 
-    private func useImageData(_ data: Data) {
-        if let prepared = PhotoProcessing.preparedData(from: data) {
+    private func useImageData(_ prepared: Data?) {
+        if let prepared {
             imageData = prepared
             arasaacPictogramID = nil
         }

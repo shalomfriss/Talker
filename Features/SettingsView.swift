@@ -2,6 +2,10 @@ import AVFoundation
 import SwiftUI
 import UniformTypeIdentifiers
 
+private struct VoiceSnapshot: @unchecked Sendable {
+    let voices: [AVSpeechSynthesisVoice]
+}
+
 struct SettingsView: View {
     @EnvironmentObject private var store: CommunicationStore
     @Environment(\.scenePhase) private var scenePhase
@@ -10,12 +14,14 @@ struct SettingsView: View {
     @State private var exportDocument: BackupDocument?
     @State private var backupError: String?
     @State private var pendingBackup: PendingBackupImport?
+    @State private var isPreparingBackup = false
     @State private var showingProfiles = false
     @State private var showingPassport = false
     @State private var showingBoardOnlySetup = false
     @State private var printableBoardsDocument: PrintableBoardsDocument?
     @State private var personalVoiceStatus = AVSpeechSynthesizer.personalVoiceAuthorizationStatus
     @State private var availableVoices: [AVSpeechSynthesisVoice] = []
+    @State private var isLoadingVoices = false
     @State private var isAdjustingSettings = false
 
     private var voices: [AVSpeechSynthesisVoice] {
@@ -23,6 +29,18 @@ struct SettingsView: View {
         return availableVoices
             .filter { $0.language.hasPrefix(language) }
             .sorted { $0.name < $1.name }
+    }
+
+    private var primaryVoicePicker: some View {
+        Picker("Voice", selection: $store.settings.voiceIdentifier) {
+            Text("System default").tag("")
+            ForEach(voices, id: \.identifier) { voice in
+                Text(voice.voiceTraits.contains(.isPersonalVoice) ? "Personal Voice: \(voice.name) (\(voice.language))"
+                     : "\(voice.name) (\(voice.language))")
+                    .tag(voice.identifier)
+            }
+        }
+        .accessibilityIdentifier("voice-picker")
     }
 
     private var switchAccessSection: some View {
@@ -209,14 +227,7 @@ struct SettingsView: View {
                     Text("Open the speech sound button on Speak to adjust volume quickly. Device volume buttons still control the overall sound level.")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
-                    Picker("Voice", selection: $store.settings.voiceIdentifier) {
-                        Text("System default").tag("")
-                        ForEach(voices, id: \.identifier) { voice in
-                            Text("\(voice.voiceTraits.contains(.isPersonalVoice) ? "Personal Voice: " : "")\(voice.name) (\(voice.language))")
-                                .tag(voice.identifier)
-                        }
-                    }
-                    .accessibilityIdentifier("voice-picker")
+                    primaryVoicePicker
                     NavigationLink {
                         PronunciationsView()
                     } label: {
@@ -240,6 +251,13 @@ struct SettingsView: View {
                         Slider(value: $store.settings.speechRate, in: 0.35...0.6,
                                onEditingChanged: settingsAdjustmentChanged)
                             .accessibilityLabel("Voice speed")
+                    }
+                    VStack(alignment: .leading) {
+                        Text("Voice pitch: \(store.settings.speechPitch, specifier: "%.2f")×")
+                        Slider(value: $store.settings.speechPitch, in: 0.5...2.0, step: 0.05,
+                               onEditingChanged: settingsAdjustmentChanged)
+                            .accessibilityLabel("Voice pitch")
+                            .accessibilityIdentifier("settings-voice-pitch")
                     }
                     Button("Try voice", systemImage: "speaker.wave.2") {
                         store.speak(store.settings.communicationLanguage == "es"
@@ -392,7 +410,7 @@ struct SettingsView: View {
                         .foregroundStyle(.secondary)
                 }
                 Section("Your data") {
-                    Text("The current profile’s words, photos, scenes, recordings, phrases, jokes, choice boards, routines, weekly plan, feelings log, and communication passport are stored on this device. No account is needed.")
+                    Text("The current profile’s words, photos, scenes, recordings, phrases, jokes, choice boards, routines, weekly plan, optional usage records, feelings log, and communication passport are stored on this device. No account is needed.")
                         .foregroundStyle(.secondary)
                     Toggle("Save spoken messages on this device", isOn: $store.settings.saveHistory)
                     Text("Off by default. When on, the most recent 50 complete messages appear under Phrases. You can pause new entries from Speak; the pause stays with this profile. Existing entries remain until you delete them.")
@@ -401,6 +419,17 @@ struct SettingsView: View {
                     if !store.history.isEmpty {
                         Button("Delete all recent messages", role: .destructive) { store.clearHistory() }
                     }
+                    Toggle("Record communication button use", isOn: $store.settings.recordCommunicationUse)
+                        .accessibilityIdentifier("record-communication-use")
+                    Text("Off by default. When on, this profile keeps up to 1,000 recent picture-button and saved-phrase selections on this device. Private conversations are excluded. Turning recording off keeps existing entries until you delete them.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                    NavigationLink {
+                        CommunicationUsageView()
+                    } label: {
+                        Label("Review communication use", systemImage: "chart.bar.xaxis")
+                    }
+                    .accessibilityIdentifier("review-communication-use")
                     Toggle("Learn word and sentence suggestions from spoken messages", isOn: $store.settings.learnPrediction)
                         .accessibilityIdentifier("learn-prediction-toggle")
                     Text("Off by default. When on, short word patterns from messages you speak are saved on this device for this profile, even if message history is off. Repeated patterns can complete short sentences. The Speak pause stops new learning. Turning learning off keeps existing patterns until you clear them.")
@@ -434,6 +463,8 @@ struct SettingsView: View {
                         } catch { backupError = error.localizedDescription }
                     }
                     Button("Import into current profile", systemImage: "square.and.arrow.down") { showingImporter = true }
+                        .disabled(isPreparingBackup)
+                    if isPreparingBackup { ProgressView("Reading backup") }
                 }
                 Section("Printable communication boards") {
                     Text("Create a paper copy of this profile’s boards in the selected board language for times when the device is unavailable. Your photos and linked board page numbers are included.")
@@ -484,12 +515,12 @@ struct SettingsView: View {
             .fileImporter(isPresented: $showingImporter, allowedContentTypes: [.json]) { result in
                 do {
                     let url = try result.get()
-                    let access = url.startAccessingSecurityScopedResource()
-                    defer { if access { url.stopAccessingSecurityScopedResource() } }
-                    let data = try Data(contentsOf: url)
-                    let preview = try JSONDecoder().decode(StoredData.self, from: data)
-                    guard !preview.items.isEmpty else { throw BackupError.emptyVocabulary }
-                    pendingBackup = PendingBackupImport(data: data, preview: preview)
+                    isPreparingBackup = true
+                    Task {
+                        defer { isPreparingBackup = false }
+                        do { pendingBackup = try await PendingBackupImport.load(from: url) }
+                        catch { backupError = error.localizedDescription }
+                    }
                 } catch { backupError = error.localizedDescription }
             }
             .alert("File error", isPresented: Binding(
@@ -511,13 +542,130 @@ struct SettingsView: View {
 
     private func refreshVoices() {
         personalVoiceStatus = AVSpeechSynthesizer.personalVoiceAuthorizationStatus
-        availableVoices = AVSpeechSynthesisVoice.speechVoices()
+        guard !isLoadingVoices else { return }
+        isLoadingVoices = true
+        Task {
+            let snapshot = await Task.detached(priority: .userInitiated) {
+                VoiceSnapshot(voices: AVSpeechSynthesisVoice.speechVoices())
+            }.value
+            availableVoices = snapshot.voices
+            isLoadingVoices = false
+        }
     }
 }
 
 private struct PrintableBoardsDocument: Identifiable {
     let id = UUID()
     let data: Data
+}
+
+private struct CommunicationUsageDocument: FileDocument {
+    static var readableContentTypes: [UTType] { [.commaSeparatedText] }
+    static var writableContentTypes: [UTType] { [.commaSeparatedText] }
+    var data: Data
+
+    init(data: Data) { self.data = data }
+
+    init(configuration: ReadConfiguration) throws {
+        data = configuration.file.regularFileContents ?? Data()
+    }
+
+    func fileWrapper(configuration: WriteConfiguration) throws -> FileWrapper {
+        FileWrapper(regularFileWithContents: data)
+    }
+}
+
+private struct CommunicationUsageCount: Identifiable {
+    let id: String
+    let label: String
+    let count: Int
+}
+
+struct CommunicationUsageView: View {
+    @EnvironmentObject private var store: CommunicationStore
+    @State private var showingExporter = false
+    @State private var exportDocument: CommunicationUsageDocument?
+    @State private var showingClearConfirmation = false
+    @State private var exportError: String?
+
+    private var topUses: [CommunicationUsageCount] {
+        var counts: [String: Int] = [:]
+        var labels: [String: String] = [:]
+        for event in store.usageEvents {
+            let key = event.kind.rawValue + ":" + (event.itemID?.uuidString ?? event.label)
+            counts[key, default: 0] += 1
+            if labels[key] == nil { labels[key] = event.label }
+        }
+        return counts.map { key, count in
+            CommunicationUsageCount(id: key, label: labels[key] ?? "", count: count)
+        }
+        .sorted { $0.count == $1.count ? $0.label < $1.label : $0.count > $1.count }
+        .prefix(10).map { $0 }
+    }
+
+    var body: some View {
+        List {
+            Section {
+                Text("\(store.usageEvents.count) recent selections for \(store.activeProfileName). Recording is \(store.settings.recordCommunicationUse ? "on" : "off").")
+                Text("Counts describe only the saved selections shown here. They are not a measure of communication ability or progress.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+            if !topUses.isEmpty {
+                Section("Most used in this record") {
+                    ForEach(topUses) { use in
+                        HStack {
+                            Text(use.label).lineLimit(2)
+                            Spacer()
+                            Text(use.count.formatted()).foregroundStyle(.secondary)
+                        }
+                    }
+                }
+            }
+            Section("Recent selections") {
+                if store.usageEvents.isEmpty {
+                    Text("No selections recorded yet.").foregroundStyle(.secondary)
+                } else {
+                    ForEach(store.usageEvents.prefix(50)) { event in
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text(event.label)
+                            Text("\(event.kind.title) · \(event.date.formatted(date: .abbreviated, time: .shortened))")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                }
+            }
+            if !store.usageEvents.isEmpty {
+                Section {
+                    Button("Export CSV", systemImage: "square.and.arrow.up") {
+                        exportDocument = CommunicationUsageDocument(
+                            data: Data(CommunicationUsageEvent.csv(store.usageEvents).utf8))
+                        showingExporter = true
+                    }
+                    .accessibilityIdentifier("export-communication-use")
+                    Button("Delete all usage records", role: .destructive) {
+                        showingClearConfirmation = true
+                    }
+                    .accessibilityIdentifier("clear-communication-use")
+                }
+            }
+        }
+        .navigationTitle("Communication use")
+        .fileExporter(isPresented: $showingExporter, document: exportDocument,
+                      contentType: .commaSeparatedText, defaultFilename: "open-voice-usage") { result in
+            if case .failure(let error) = result { exportError = error.localizedDescription }
+        }
+        .confirmationDialog("Delete all usage records for this profile?",
+                            isPresented: $showingClearConfirmation) {
+            Button("Delete records", role: .destructive) { store.clearCommunicationUse() }
+        }
+        .alert("Could not export usage", isPresented: Binding(
+            get: { exportError != nil }, set: { if !$0 { exportError = nil } }
+        )) {
+            Button("OK") { exportError = nil }
+        } message: { Text(exportError ?? "") }
+    }
 }
 
 struct CustomLetterOrderView: View {

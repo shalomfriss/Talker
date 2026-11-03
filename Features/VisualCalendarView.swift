@@ -403,6 +403,7 @@ struct VisualCalendarView: View {
     private func eventRow(_ event: CalendarEvent, on date: Date) -> some View {
         let option = event.option.resolved(using: store.items)
         let done = event.isComplete(on: date)
+        let rewardChart = store.rewardCharts.first(where: { $0.id == event.rewardChartID })
         let eventColor = store.settings.highContrast ? nil : event.colorHex.flatMap { ButtonColorValue(text: $0) }
         return HStack(spacing: 12) {
             eventPicture(option)
@@ -412,6 +413,11 @@ struct VisualCalendarView: View {
                 VStack(alignment: .leading) {
                     Text(option.label).font(.headline)
                     Text(event.repeatRule.title).font(.caption).foregroundStyle(.secondary)
+                    if let rewardChart {
+                        Label(rewardChart.title, systemImage: "star.fill")
+                            .font(.caption)
+                            .foregroundStyle(.orange)
+                    }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
@@ -454,12 +460,18 @@ struct VisualCalendarView: View {
         let option = activity.option.resolved(using: store.items)
         let done = activity.isComplete(on: date)
         let weekday = calendar.component(.weekday, from: date)
+        let rewardChart = store.rewardCharts.first(where: { $0.id == activity.rewardChartID })
         return HStack(spacing: 12) {
             eventPicture(option)
             Button { speak(option) } label: {
                 VStack(alignment: .leading) {
                     Text(option.label).font(.headline)
                     Text("Weekly plan").font(.caption).foregroundStyle(.secondary)
+                    if let rewardChart {
+                        Label(rewardChart.title, systemImage: "star.fill")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
@@ -478,8 +490,10 @@ struct VisualCalendarView: View {
 
     @ViewBuilder
     private func eventPicture(_ option: ChoiceOption) -> some View {
-        if let data = option.imageData, let image = UIImage(data: data) {
-            Image(uiImage: image).resizable().scaledToFill()
+        if let data = option.imageData {
+            AsyncThumbnailImage(data: data) {
+                Text(option.symbol).font(.title)
+            }
                 .frame(width: 48, height: 48).clipped()
                 .clipShape(RoundedRectangle(cornerRadius: 8))
                 .accessibilityHidden(true)
@@ -777,6 +791,7 @@ private struct CalendarEventEditorView: View {
     @State private var audioData: Data?
     @State private var hasCustomColor: Bool
     @State private var color: Color
+    @State private var rewardChartID: UUID?
     @State private var selectedPhoto: PhotosPickerItem?
     @StateObject private var recorder = AudioMessageRecorder()
     @State private var saveError = false
@@ -795,6 +810,7 @@ private struct CalendarEventEditorView: View {
         let savedColor = event?.colorHex.flatMap { ButtonColorValue(text: $0) }
         _hasCustomColor = State(initialValue: savedColor != nil)
         _color = State(initialValue: savedColor.map(ButtonColorAppearance.color) ?? .indigo)
+        _rewardChartID = State(initialValue: event?.rewardChartID)
     }
 
     var body: some View {
@@ -839,13 +855,39 @@ private struct CalendarEventEditorView: View {
                             .accessibilityIdentifier("calendar-event-color")
                     }
                 }
+                Section("Reward chart") {
+                    Menu {
+                        Button("No linked chart") { rewardChartID = nil }
+                        ForEach(store.rewardCharts) { chart in
+                            Button(chart.title) { rewardChartID = chart.id }
+                        }
+                    } label: {
+                        HStack {
+                            Text("Award a token on completion")
+                            Spacer()
+                            Text(store.rewardCharts.first(where: { $0.id == rewardChartID })?.title ?? "None")
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    .accessibilityIdentifier("calendar-event-reward-chart")
+                    Text("A completed occurrence earns one token while the chart has space. Rechecking the same date does not earn another.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
                 Section("Picture") {
                     PhotosPicker(selection: $selectedPhoto, matching: .images) {
                         Label("Choose a photo", systemImage: "photo")
                     }
+                    PictureLibraryPickerButton(title: "Picture library",
+                                               identifier: "calendar-event-picture-library") { picture in
+                        imageData = picture.imageData
+                    }
                     CameraPhotoButton { imageData = $0 }
-                    if let imageData, let image = UIImage(data: imageData) {
-                        Image(uiImage: image).resizable().scaledToFit().frame(maxHeight: 180)
+                    if let imageData {
+                        AsyncThumbnailImage(data: imageData, contentMode: .fit) {
+                            Image(systemName: "photo")
+                        }
+                        .frame(maxHeight: 180)
                         Button("Remove photo", role: .destructive) { self.imageData = nil }
                     }
                 }
@@ -880,7 +922,7 @@ private struct CalendarEventEditorView: View {
             .onChange(of: selectedPhoto) { _, photo in
                 Task {
                     if let data = try? await photo?.loadTransferable(type: Data.self) {
-                        imageData = PhotoProcessing.preparedData(from: data)
+                        imageData = await PhotoProcessing.preparedDataAsync(from: data)
                     }
                 }
             }
@@ -903,7 +945,8 @@ private struct CalendarEventEditorView: View {
                                     startDate: Calendar.current.startOfDay(for: date),
                                     repeatRule: repeatRule, showsCountdown: showsCountdown,
                                     completedOn: event?.completedOn ?? [], reminder: event?.reminder,
-                                    colorHex: hasCustomColor ? ButtonColorAppearance.hex(from: color) : nil)
+                                    colorHex: hasCustomColor ? ButtonColorAppearance.hex(from: color) : nil,
+                                    rewardChartID: rewardChartID)
         let saved = event == nil ? store.addCalendarEvent(updated) : store.updateCalendarEvent(updated)
         if saved { dismiss() } else { saveError = true }
     }

@@ -3,6 +3,44 @@ import UIKit
 
 final class NavigationUITests: XCTestCase {
     @MainActor
+    func testColdLaunchFirstFramePerformance() {
+        let options = XCTMeasureOptions()
+        options.iterationCount = 3
+        measure(metrics: [XCTApplicationLaunchMetric(waitUntilResponsive: false)], options: options) {
+            XCUIApplication().launch()
+        }
+    }
+
+    @MainActor
+    func testColdLaunchReachesResponsiveBoard() {
+        let options = XCTMeasureOptions()
+        options.iterationCount = 3
+        measure(metrics: [XCTApplicationLaunchMetric(waitUntilResponsive: true)], options: options) {
+            XCUIApplication().launch()
+        }
+    }
+
+    @MainActor
+    func testPrivateConversationCanStartAndEndFromConversationList() {
+        let app = XCUIApplication()
+        app.launch()
+        let conversations = app.buttons["open-conversations"].firstMatch
+        XCTAssertTrue(conversations.waitForExistence(timeout: 15))
+        conversations.tap()
+        let start = app.buttons["start-private-conversation"]
+        XCTAssertTrue(start.waitForExistence(timeout: 5))
+        start.tap()
+        XCTAssertTrue(app.buttons["Private conversation"].waitForExistence(timeout: 5))
+
+        app.buttons["open-conversations"].firstMatch.tap()
+        XCTAssertTrue(app.descendants(matching: .any)["private-conversation-active"]
+            .firstMatch.waitForExistence(timeout: 5))
+        app.buttons["end-private-conversation"].tap()
+        app.buttons["Discard private messages"].tap()
+        XCTAssertFalse(app.buttons["Private conversation"].exists)
+    }
+
+    @MainActor
     func testStoryBackgroundsRenderAndEditorChangesStyle() {
         let app = XCUIApplication()
         app.launchArguments.append("-ui-test-story-background")
@@ -714,6 +752,191 @@ final class NavigationUITests: XCTestCase {
     }
 
     @MainActor
+    func testLifeNotebookMomentCanBeCreatedOpenedAndReopened() {
+        let app = XCUIApplication()
+        app.launchArguments = ["-ui-test-life-notebook"]
+        app.launch()
+        defer {
+            app.terminate()
+            app.launchArguments = ["-ui-test-life-notebook-cleanup"]
+            app.launch()
+        }
+
+        app.buttons["open-notes"].tap()
+        app.buttons["open-life-notebook"].tap()
+        XCTAssertTrue(app.navigationBars["Life notebook"].waitForExistence(timeout: 5))
+        app.buttons["new-life-notebook-post"].tap()
+        let title = "Park visit \(UUID().uuidString.prefix(6))"
+        let titleField = app.textFields["life-notebook-title"]
+        titleField.tap()
+        titleField.typeText(title + "\n")
+        let caption = app.textViews["life-notebook-caption"]
+        for _ in 0..<4 where !caption.isHittable { app.swipeUp() }
+        XCTAssertTrue(caption.waitForExistence(timeout: 5))
+        caption.tap()
+        caption.typeText("We saw ducks at the pond.")
+        app.buttons["save-life-notebook-post"].tap()
+        let post = app.buttons.matching(NSPredicate(
+            format: "identifier BEGINSWITH %@", "life-notebook-post-")).firstMatch
+        XCTAssertTrue(post.waitForExistence(timeout: 5))
+        post.tap()
+        XCTAssertTrue(app.staticTexts["We saw ducks at the pond."].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["speak-life-notebook-post"].exists)
+        app.buttons["export-life-notebook-post"].tap()
+        let saveFile = app.buttons["Save"].firstMatch
+        XCTAssertTrue(saveFile.waitForExistence(timeout: 30))
+        saveFile.tap()
+        let closed = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == false"),
+                                               object: saveFile)
+        XCTAssertEqual(XCTWaiter.wait(for: [closed], timeout: 15), .completed)
+
+        app.terminate()
+        app.launchArguments = []
+        app.launch()
+        app.buttons["open-notes"].tap()
+        app.buttons["open-life-notebook"].tap()
+        XCTAssertTrue(app.staticTexts[title].waitForExistence(timeout: 5))
+    }
+
+    @MainActor
+    func testLifeNotebookVideoOpensAndPlays() {
+        let app = XCUIApplication()
+        app.launchArguments = ["-ui-test-life-notebook-video"]
+        app.launch()
+        defer {
+            app.terminate()
+            app.launchArguments = ["-ui-test-life-notebook-video-cleanup"]
+            app.launch()
+        }
+
+        app.buttons["open-notes"].tap()
+        app.buttons["open-life-notebook"].tap()
+        let post = app.buttons.matching(NSPredicate(
+            format: "identifier BEGINSWITH %@", "life-notebook-post-")).firstMatch
+        XCTAssertTrue(post.waitForExistence(timeout: 10))
+        post.tap()
+        XCTAssertTrue(app.buttons["watch-life-notebook-video"].waitForExistence(timeout: 5))
+        app.buttons["watch-life-notebook-video"].tap()
+        XCTAssertTrue(app.otherElements["hotspot-video-player"].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.buttons["hotspot-video-replay"].exists)
+    }
+
+    @MainActor
+    func testLifeNotebookPictureWordsCanBeCreatedSpokenAndReopened() {
+        let app = XCUIApplication()
+        app.launchArguments = ["-ui-test-life-notebook"]
+        app.launch()
+        defer {
+            app.terminate()
+            app.launchArguments = ["-ui-test-life-notebook-cleanup"]
+            app.launch()
+        }
+
+        app.buttons["open-notes"].tap()
+        app.buttons["open-life-notebook"].tap()
+        app.buttons["new-life-notebook-post"].tap()
+        let title = "Picture day \(UUID().uuidString.prefix(6))"
+        let titleField = app.textFields["life-notebook-title"]
+        titleField.tap()
+        titleField.typeText(title)
+        let wordField = app.textFields["life-notebook-new-picture-word"]
+        for _ in 0..<3 where !wordField.exists { app.swipeUp() }
+        XCTAssertTrue(wordField.waitForExistence(timeout: 5))
+        wordField.tap()
+        wordField.typeText("playground\n")
+        let addWord = app.buttons["life-notebook-add-picture-word"]
+        XCTAssertTrue(addWord.isEnabled)
+        addWord.tap()
+        let pictureLabels = app.textFields.matching(NSPredicate(
+            format: "identifier BEGINSWITH %@", "life-notebook-picture-label-"))
+        XCTAssertTrue(pictureLabels.firstMatch.waitForExistence(timeout: 5))
+        app.buttons["life-notebook-add-button-picture"].tap()
+        let buttonPicture = app.buttons.matching(NSPredicate(
+            format: "identifier BEGINSWITH %@", "life-notebook-button-option-")).firstMatch
+        XCTAssertTrue(buttonPicture.waitForExistence(timeout: 5))
+        buttonPicture.tap()
+        XCTAssertTrue(pictureLabels.element(boundBy: 1).waitForExistence(timeout: 5))
+        app.buttons["save-life-notebook-post"].tap()
+
+        let post = app.buttons.matching(NSPredicate(
+            format: "identifier BEGINSWITH %@", "life-notebook-post-")).firstMatch
+        XCTAssertTrue(post.waitForExistence(timeout: 5))
+        post.tap()
+        XCTAssertTrue(app.buttons["speak-life-notebook-picture-words"].waitForExistence(timeout: 5))
+        let pictureWords = app.buttons.matching(NSPredicate(
+            format: "identifier BEGINSWITH %@", "life-notebook-picture-word-"))
+        XCTAssertTrue(pictureWords.element(boundBy: 1).waitForExistence(timeout: 5))
+        app.buttons["speak-life-notebook-picture-words"].tap()
+
+        app.terminate()
+        app.launchArguments = []
+        app.launch()
+        app.buttons["open-notes"].tap()
+        app.buttons["open-life-notebook"].tap()
+        XCTAssertTrue(app.staticTexts[title].waitForExistence(timeout: 5))
+    }
+
+    @MainActor
+    func testLifeNotebookConversationCanBeAddedAndReopened() {
+        let app = XCUIApplication()
+        app.launchArguments = ["-ui-test-life-notebook"]
+        app.launch()
+        defer {
+            app.terminate()
+            app.launchArguments = ["-ui-test-life-notebook-cleanup"]
+            app.launch()
+        }
+
+        app.buttons["open-notes"].tap()
+        app.buttons["open-life-notebook"].tap()
+        app.buttons["new-life-notebook-post"].tap()
+        let title = "Conversation day \(UUID().uuidString.prefix(6))"
+        let titleField = app.textFields["life-notebook-title"]
+        titleField.tap()
+        titleField.typeText(title + "\n")
+        let caption = app.textViews["life-notebook-caption"]
+        for _ in 0..<4 where !caption.isHittable { app.swipeUp() }
+        XCTAssertTrue(caption.waitForExistence(timeout: 5))
+        caption.tap()
+        caption.typeText("We went outside.")
+        app.buttons["save-life-notebook-post"].tap()
+        let post = app.buttons.matching(NSPredicate(
+            format: "identifier BEGINSWITH %@", "life-notebook-post-")).firstMatch
+        XCTAssertTrue(post.waitForExistence(timeout: 5))
+        post.tap()
+
+        let addMine = app.buttons["add-life-notebook-my-reply"]
+        for _ in 0..<4 where !addMine.isHittable { app.swipeUp() }
+        XCTAssertTrue(addMine.waitForExistence(timeout: 5))
+        addMine.tap()
+        let replyField = app.textViews["life-notebook-reply-text"]
+        XCTAssertTrue(replyField.waitForExistence(timeout: 5))
+        replyField.tap()
+        replyField.typeText("I liked the ducks.")
+        app.buttons["save-life-notebook-reply"].tap()
+        XCTAssertTrue(app.staticTexts["I liked the ducks."].waitForExistence(timeout: 5))
+
+        let addPartner = app.buttons["add-life-notebook-partner-question"]
+        for _ in 0..<4 where !addPartner.isHittable { app.swipeUp() }
+        addPartner.tap()
+        XCTAssertTrue(replyField.waitForExistence(timeout: 5))
+        replyField.tap()
+        replyField.typeText("What did you see?")
+        app.buttons["save-life-notebook-reply"].tap()
+        XCTAssertTrue(app.staticTexts["What did you see?"].waitForExistence(timeout: 5))
+
+        app.terminate()
+        app.launchArguments = []
+        app.launch()
+        app.buttons["open-notes"].tap()
+        app.buttons["open-life-notebook"].tap()
+        XCTAssertTrue(app.staticTexts[title].waitForExistence(timeout: 5))
+        post.tap()
+        XCTAssertTrue(app.staticTexts["I liked the ducks."].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["What did you see?"].exists)
+    }
+
+    @MainActor
     func testCommunicationRepairSpeaksWithoutChangingPictureOrTypedDrafts() {
         let app = XCUIApplication()
         app.launch()
@@ -1242,6 +1465,11 @@ final class NavigationUITests: XCTestCase {
             .firstMatch.tap()
         XCTAssertTrue(app.navigationBars["Reward chart"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.staticTexts["0 of 5 tokens"].waitForExistence(timeout: 5))
+        app.buttons["reward-print-chart"].tap()
+        XCTAssertTrue(app.navigationBars["Reward chart PDF"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["Save PDF"].exists)
+        XCTAssertTrue(app.buttons["Print"].exists)
+        app.buttons["Done"].tap()
         for _ in 0..<5 { app.buttons["reward-add-token"].tap() }
         XCTAssertTrue(app.staticTexts["Goal reached!"].waitForExistence(timeout: 5))
         let filled = XCTAttachment(screenshot: app.screenshot())
@@ -1256,6 +1484,102 @@ final class NavigationUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["Choose music"].waitForExistence(timeout: 5))
         app.buttons["Speak"].firstMatch.tap()
         XCTAssertTrue(app.buttons["Yes"].firstMatch.waitForExistence(timeout: 5))
+    }
+
+    @MainActor
+    func testPastedRewardPhotoAppearsInChart() {
+        let app = XCUIApplication()
+        app.launchArguments = ["-ui-test-reward-chart", "-ui-test-paste-photo"]
+        app.launch()
+        app.buttons["Routine"].firstMatch.tap()
+        app.buttons["open-reward-charts"].tap()
+        app.buttons["reward-add-chart"].tap()
+        let title = app.textFields["reward-chart-name"]
+        XCTAssertTrue(title.waitForExistence(timeout: 5))
+        title.tap()
+        title.typeText("Photo reward")
+        let reward = app.textFields["reward-chart-reward"]
+        reward.tap()
+        reward.typeText("Choose a book")
+        let paste = app.buttons["reward-chart-paste-photo"]
+        for _ in 0..<6 where !paste.isHittable { app.swipeUp() }
+        XCTAssertTrue(paste.isHittable)
+        paste.tap()
+        let removePhoto = app.buttons["Remove photo"]
+        for _ in 0..<5 where !removePhoto.exists { app.swipeUp() }
+        XCTAssertTrue(removePhoto.waitForExistence(timeout: 10))
+        app.buttons["reward-chart-save"].tap()
+        let chart = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "reward-chart-"))
+            .firstMatch
+        XCTAssertTrue(chart.waitForExistence(timeout: 5))
+        chart.tap()
+        XCTAssertTrue(app.images["Reward photo"].waitForExistence(timeout: 10))
+    }
+
+    @MainActor
+    func testWeeklyActivityCanAwardLinkedRewardChart() {
+        let app = XCUIApplication()
+        app.launchArguments.append("-ui-test-weekly-reward")
+        app.launch()
+        app.buttons["Routine"].firstMatch.tap()
+        app.buttons["open-weekly-plan"].tap()
+        app.buttons["add-weekly-activity"].tap()
+        let name = "Weekly reward test"
+        let title = app.textFields["weekly-activity-title"]
+        XCTAssertTrue(title.waitForExistence(timeout: 5))
+        title.tap()
+        title.typeText(name)
+        let link = app.buttons["weekly-activity-reward-chart"]
+        for _ in 0..<8 where !link.isHittable { app.swipeUp() }
+        XCTAssertTrue(link.isHittable)
+        link.tap()
+        app.buttons["Weekly stars test"].tap()
+        app.buttons["save-weekly-activity"].tap()
+        XCTAssertTrue(app.staticTexts["Weekly stars test"].waitForExistence(timeout: 5))
+        app.buttons["Mark done: \(name)"].tap()
+        XCTAssertTrue(app.buttons["Mark not done: \(name)"].waitForExistence(timeout: 5))
+
+        app.navigationBars["Weekly plan"].buttons["Routine"].tap()
+        app.buttons["open-reward-charts"].tap()
+        app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "reward-chart-"))
+            .firstMatch.tap()
+        XCTAssertTrue(app.staticTexts["1 of 2 tokens"].waitForExistence(timeout: 5))
+    }
+
+    @MainActor
+    func testCalendarEventCanAwardLinkedRewardChart() {
+        let app = XCUIApplication()
+        app.launchArguments.append("-ui-test-calendar-reward")
+        app.launch()
+        app.buttons["Routine"].firstMatch.tap()
+        app.buttons["open-visual-calendar"].tap()
+        app.buttons["calendar-add-event"].tap()
+        let name = "Calendar reward test"
+        let title = app.textFields["calendar-event-title"]
+        XCTAssertTrue(title.waitForExistence(timeout: 5))
+        title.tap()
+        title.typeText(name)
+        app.buttons["calendar-done-editing"].tap()
+        let link = app.buttons["calendar-event-reward-chart"]
+        for _ in 0..<8 where !link.isHittable { app.swipeUp() }
+        XCTAssertTrue(link.isHittable)
+        link.tap()
+        app.buttons["Calendar stars test"].tap()
+        app.buttons["calendar-save-event"].tap()
+        XCTAssertTrue(app.staticTexts["Calendar stars test"].waitForExistence(timeout: 5))
+        app.buttons["Mark done for \(name)"].tap()
+        XCTAssertTrue(app.buttons["Mark not done for \(name)"].waitForExistence(timeout: 5))
+
+        let calendarBack = app.navigationBars["Visual calendar"].buttons["Back"]
+        if calendarBack.exists {
+            calendarBack.tap()
+        } else {
+            app.navigationBars["Visual calendar"].buttons.firstMatch.tap()
+        }
+        app.buttons["open-reward-charts"].tap()
+        app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "reward-chart-"))
+            .firstMatch.tap()
+        XCTAssertTrue(app.staticTexts["1 of 2 tokens"].waitForExistence(timeout: 5))
     }
 
     @MainActor
@@ -1292,6 +1616,38 @@ final class NavigationUITests: XCTestCase {
         app.buttons["first-then-reset"].tap()
         app.buttons["routine-board-complete-step"].tap()
         XCTAssertTrue(progress.label.contains("Routine stars: 2 of 2 tokens"))
+        XCTAssertTrue(app.staticTexts["first-then-reward-notice"].label.contains("ready to collect"))
+    }
+
+    @MainActor
+    func testSavedRoutineAwardsEachStepOncePerRun() {
+        let app = XCUIApplication()
+        app.launchArguments.append("-ui-test-routine-step-reward")
+        app.launch()
+        app.buttons["Routine"].firstMatch.tap()
+        app.buttons["open-routine-templates"].tap()
+        app.staticTexts["Reward routine test"].tap()
+        app.buttons["routine-template-reward-chart"].tap()
+        app.buttons["Routine stars"].tap()
+        app.swipeUp()
+        app.buttons["routine-template-reward-frequency"].tap()
+        app.descendants(matching: .any).matching(NSPredicate(format: "label == %@", "Each step")).firstMatch.tap()
+        app.swipeDown()
+        app.buttons["routine-template-board"].tap()
+        let progress = app.staticTexts["first-then-reward-progress"]
+        XCTAssertTrue(progress.waitForExistence(timeout: 5))
+        XCTAssertTrue(progress.label.contains("0 of 2 tokens"))
+        app.buttons["first-then-done"].tap()
+        XCTAssertTrue(progress.label.contains("1 of 2 tokens"))
+
+        let mode = app.descendants(matching: .any)["routine-board-mode"].firstMatch
+        mode.tap()
+        app.buttons["Checklist"].tap()
+        app.buttons["routine-board-undo-step"].firstMatch.tap()
+        app.buttons["routine-board-complete-step"].firstMatch.tap()
+        XCTAssertTrue(progress.label.contains("1 of 2 tokens"))
+        app.buttons["routine-board-complete-step"].firstMatch.tap()
+        XCTAssertTrue(progress.label.contains("2 of 2 tokens"))
         XCTAssertTrue(app.staticTexts["first-then-reward-notice"].label.contains("ready to collect"))
     }
 
@@ -1758,7 +2114,10 @@ final class NavigationUITests: XCTestCase {
         app.buttons["pain-area-head"].tap()
         app.segmentedControls.buttons["Back"].tap()
         app.buttons["pain-area-lowerBack"].tap()
-        app.buttons["Sharp"].tap()
+        let sharp = app.buttons["Sharp"]
+        for _ in 0..<8 where !sharp.isHittable { app.swipeUp() }
+        XCTAssertTrue(sharp.isHittable)
+        sharp.tap()
         let fivePointScale = app.buttons["1–5"]
         for _ in 0..<8 where !fivePointScale.isHittable { app.swipeUp() }
         XCTAssertTrue(fivePointScale.isHittable)
@@ -1781,6 +2140,37 @@ final class NavigationUITests: XCTestCase {
         messageScreenshot.name = "Pain check-in message and actions"
         messageScreenshot.lifetime = .keepAlways
         add(messageScreenshot)
+    }
+
+    @MainActor
+    func testPainSilhouetteSelectsFrontAndBackAreas() {
+        let app = XCUIApplication()
+        app.launchArguments += ["-ui-test-pain-touch"]
+        app.launch()
+        app.buttons["Phrases"].firstMatch.tap()
+        let painLink = app.descendants(matching: .any)["pain-check-in-link"].firstMatch
+        for _ in 0..<12 where !painLink.isHittable { app.swipeUp() }
+        XCTAssertTrue(painLink.isHittable)
+        painLink.tap()
+        XCTAssertTrue(app.navigationBars["Pain check-in"].waitForExistence(timeout: 5))
+
+        let head = app.buttons["pain-map-head"]
+        for _ in 0..<8 where !head.isHittable { app.swipeUp() }
+        XCTAssertTrue(head.isHittable)
+        head.tap()
+        XCTAssertTrue(app.staticTexts["I have pain in my head."].waitForExistence(timeout: 5))
+
+        app.segmentedControls.buttons["Back"].tap()
+        let lowerBack = app.buttons["pain-map-lowerBack"]
+        for _ in 0..<8 where !lowerBack.isHittable { app.swipeUp() }
+        XCTAssertTrue(lowerBack.isHittable)
+        lowerBack.tap()
+        XCTAssertTrue(app.staticTexts["I have pain in my head and my lower back."].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["pain-area-lowerBack"].isSelected)
+        let screenshot = XCTAttachment(screenshot: app.screenshot())
+        screenshot.name = "Front and back pain silhouette"
+        screenshot.lifetime = .keepAlways
+        add(screenshot)
     }
 
     @MainActor
@@ -1966,6 +2356,35 @@ final class NavigationUITests: XCTestCase {
         screenshot.name = "Routine step timer paused"
         screenshot.lifetime = .keepAlways
         add(screenshot)
+    }
+
+    @MainActor
+    func testFullScreenWaitingTimerKeepsCommunicationAvailable() {
+        let app = XCUIApplication()
+        app.launch()
+        app.buttons["Routine"].firstMatch.tap()
+        let openTimer = app.buttons["open-full-screen-wait"]
+        for _ in 0..<15 where !openTimer.isHittable { app.swipeUp() }
+        XCTAssertTrue(openTimer.isHittable)
+        openTimer.tap()
+
+        let remaining = app.staticTexts["full-screen-wait-remaining"]
+        XCTAssertTrue(remaining.waitForExistence(timeout: 5))
+        let initialTime = remaining.label
+        app.buttons["full-screen-wait-toggle"].tap()
+        XCTAssertTrue(app.buttons["Pause"].waitForExistence(timeout: 5))
+        let countdownChanged = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "label != %@", initialTime), object: remaining)
+        XCTAssertEqual(XCTWaiter.wait(for: [countdownChanged], timeout: 5), .completed)
+        app.buttons["full-screen-wait-toggle"].tap()
+        app.buttons["full-screen-wait-reset"].tap()
+        XCTAssertTrue(app.staticTexts["full-screen-wait-remaining"].exists)
+        let screenshot = XCTAttachment(screenshot: app.screenshot())
+        screenshot.name = "Full screen waiting timer"
+        screenshot.lifetime = .keepAlways
+        add(screenshot)
+        app.buttons["full-screen-wait-open-speak"].tap()
+        XCTAssertTrue(app.buttons["open-conversations"].firstMatch.waitForExistence(timeout: 10))
     }
 
     @MainActor
@@ -2579,6 +2998,14 @@ final class NavigationUITests: XCTestCase {
         XCTAssertTrue(oneTap.waitForExistence(timeout: 5))
         oneTap.coordinate(withNormalizedOffset: CGVector(dx: 0.97, dy: 0.5)).tap()
         XCTAssertEqual(oneTap.value as? String, "1")
+        app.buttons["Keyboard switch keys"].tap()
+        let advanceKey = app.descendants(matching: .any)["story-advance-key"].firstMatch
+        XCTAssertTrue(advanceKey.waitForExistence(timeout: 5))
+        advanceKey.tap()
+        app.buttons["Right Arrow"].firstMatch.tap()
+        app.navigationBars["Keyboard switch keys"].buttons["Done"].tap()
+        XCTAssertTrue(app.staticTexts.matching(NSPredicate(
+            format: "label CONTAINS %@", "Press Right Arrow on a keyboard switch.")).firstMatch.exists)
         let action = app.buttons["story-read-page"]
         XCTAssertTrue(action.waitForExistence(timeout: 5))
         XCTAssertTrue(app.staticTexts["1 of 2"].exists)
@@ -2618,6 +3045,20 @@ final class NavigationUITests: XCTestCase {
         XCTAssertEqual(twoSwitch.value as? String, "1")
         XCTAssertEqual(oneTap.value as? String, "0")
 
+        app.buttons["Keyboard switch keys"].tap()
+        app.buttons["story-capture-read-key"].tap()
+        XCTAssertTrue(app.textFields["story-key-capture-target"].waitForExistence(timeout: 5))
+        app.buttons["Cancel"].tap()
+        let readKey = app.descendants(matching: .any)["story-read-key"].firstMatch
+        XCTAssertTrue(readKey.waitForExistence(timeout: 5))
+        readKey.tap()
+        app.buttons["Right Arrow"].firstMatch.tap()
+        let nextKey = app.descendants(matching: .any)["story-advance-key"].firstMatch
+        nextKey.tap()
+        app.buttons["N"].firstMatch.tap()
+        app.navigationBars["Keyboard switch keys"].buttons["Done"].tap()
+        XCTAssertTrue(app.staticTexts["Right Arrow reads this page. N moves to the next page."].exists)
+
         let read = app.buttons["story-read-page"]
         let next = app.buttons["story-switch-next-page"]
         XCTAssertTrue(read.waitForExistence(timeout: 5))
@@ -2636,6 +3077,28 @@ final class NavigationUITests: XCTestCase {
         screenshot.name = "Two-switch story controls"
         screenshot.lifetime = .keepAlways
         add(screenshot)
+    }
+
+    @MainActor
+    func testStorySwitchCapturesAKeyboardKey() {
+        let app = XCUIApplication()
+        app.launchArguments.append("-ui-test-story-one-tap")
+        app.launch()
+        app.buttons["Stories"].firstMatch.tap()
+        app.staticTexts["One tap story test"].tap()
+        let twoSwitch = app.switches["story-two-switch-toggle"]
+        XCTAssertTrue(twoSwitch.waitForExistence(timeout: 5))
+        twoSwitch.coordinate(withNormalizedOffset: CGVector(dx: 0.97, dy: 0.5)).tap()
+        app.buttons["Keyboard switch keys"].tap()
+        app.buttons["story-capture-read-key"].tap()
+        let capture = app.textFields["story-key-capture-target"]
+        XCTAssertTrue(capture.waitForExistence(timeout: 5))
+        capture.tap()
+        app.typeText("q")
+        XCTAssertTrue(app.descendants(matching: .any)["story-read-key"].firstMatch
+            .waitForExistence(timeout: 5))
+        app.navigationBars["Keyboard switch keys"].buttons["Done"].tap()
+        XCTAssertTrue(app.staticTexts["Q reads this page. Space moves to the next page."].exists)
     }
 
     @MainActor
@@ -2832,6 +3295,9 @@ final class NavigationUITests: XCTestCase {
         app.launch()
         app.buttons["Settings"].firstMatch.tap()
         XCTAssertTrue(app.descendants(matching: .any)["voice-picker"].waitForExistence(timeout: 5))
+        let pitch = app.sliders["settings-voice-pitch"]
+        for _ in 0..<4 where !pitch.exists { app.swipeUp() }
+        XCTAssertTrue(pitch.exists)
 
         let personalVoiceHeading = app.staticTexts["Personal Voice"]
         for _ in 0..<4 {
@@ -2868,6 +3334,19 @@ final class NavigationUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts[message].firstMatch.waitForExistence(timeout: 5))
         XCTAssertTrue(app.buttons["single-button-record"].exists)
         let lock = app.buttons["single-button-lock"]
+        if lock.label.contains("Show editing") { lock.tap() }
+
+        app.buttons["Speak"].firstMatch.tap()
+        app.buttons["Customize"].tap()
+        app.buttons["One button mode"].tap()
+        let directRecord = app.buttons["single-button-record-direct"]
+        XCTAssertTrue(directRecord.waitForExistence(timeout: 5))
+        directRecord.tap()
+        XCTAssertTrue(app.navigationBars["Phrase voice"].waitForExistence(timeout: 5))
+        app.buttons["Cancel"].tap()
+        app.buttons["Done"].tap()
+        app.buttons["Phrases"].firstMatch.tap()
+
         if lock.label.contains("Hide editing") { lock.tap() }
         XCTAssertTrue(lock.label.contains("Show editing"))
 
@@ -2878,12 +3357,32 @@ final class NavigationUITests: XCTestCase {
         let play = app.buttons["single-button-play"]
         XCTAssertTrue(play.waitForExistence(timeout: 5))
         XCTAssertFalse(app.buttons["single-button-setup"].exists)
+        XCTAssertFalse(app.buttons["single-button-record-direct"].exists)
         play.tap()
         let screenshot = XCTAttachment(screenshot: app.screenshot())
         screenshot.name = "Locked one button mode"
         screenshot.lifetime = .keepAlways
         add(screenshot)
         app.buttons["Done"].tap()
+    }
+
+    @MainActor
+    func testSpeakingClockOpensAndSpeaksWithoutChangingPictureMessage() {
+        let app = XCUIApplication()
+        app.launch()
+        let clear = app.buttons["Clear message"]
+        if clear.isEnabled { clear.tap() }
+        app.buttons["Customize"].tap()
+        app.buttons["open-speaking-clock"].tap()
+        let speakTime = app.buttons["speak-current-time"]
+        XCTAssertTrue(speakTime.waitForExistence(timeout: 5))
+        speakTime.tap()
+        let screenshot = XCTAttachment(screenshot: app.screenshot())
+        screenshot.name = "Speaking clock"
+        screenshot.lifetime = .keepAlways
+        add(screenshot)
+        app.buttons["Done"].tap()
+        XCTAssertTrue(app.staticTexts["Message: empty"].waitForExistence(timeout: 5))
     }
 
     @MainActor
@@ -4038,6 +4537,25 @@ final class NavigationUITests: XCTestCase {
     }
 
     @MainActor
+    func testThousandWordBoardCanComposeWithoutInteractionDelay() {
+        let app = XCUIApplication()
+        app.launchArguments.append("-ui-test-large-board-startup")
+        app.launch()
+        defer {
+            app.terminate()
+            app.launchArguments = ["-ui-test-large-board-cleanup"]
+            app.launch()
+        }
+
+        let firstWord = app.buttons["I"].firstMatch
+        XCTAssertTrue(firstWord.waitForExistence(timeout: 10))
+        firstWord.tap()
+        XCTAssertTrue(app.staticTexts["Message: I"].waitForExistence(timeout: 3))
+        app.buttons["want"].firstMatch.tap()
+        XCTAssertTrue(app.staticTexts["Message: I want"].waitForExistence(timeout: 3))
+    }
+
+    @MainActor
     func testShortPhraseLabelAppearsOnListAndCardAfterRelaunch() {
         let app = XCUIApplication()
         app.launch()
@@ -4417,12 +4935,43 @@ final class NavigationUITests: XCTestCase {
     }
 
     @MainActor
+    func testLanguageSampleCanAddPartnerTurnAndOffersTextExport() {
+        let app = XCUIApplication()
+        app.launchArguments = ["-ui-test-language-sample"]
+        app.launch()
+        defer {
+            app.terminate()
+            app.launchArguments = ["-ui-test-language-sample-cleanup"]
+            app.launch()
+        }
+        app.buttons["Phrases"].firstMatch.tap()
+        let recent = app.buttons["Recent messages"]
+        for _ in 0..<12 where !recent.isHittable { app.swipeUp() }
+        recent.tap()
+        app.buttons["open-language-sample"].tap()
+        XCTAssertTrue(app.navigationBars["Language sample"].waitForExistence(timeout: 5))
+        app.buttons["add-partner-turn"].tap()
+        let note = app.descendants(matching: .any)["partner-turn-text"]
+        XCTAssertTrue(note.waitForExistence(timeout: 5))
+        note.tap()
+        note.typeText("Please wait a moment.")
+        app.buttons["save-partner-turn"].tap()
+        XCTAssertTrue(app.descendants(matching: .any)
+            .matching(NSPredicate(format: "label CONTAINS %@", "Please wait a moment."))
+            .firstMatch.waitForExistence(timeout: 5))
+        app.buttons["export-language-sample"].tap()
+        XCTAssertTrue(app.buttons["save-language-sample-file"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["save-language-sample-csv-file"].exists)
+        XCTAssertTrue(app.buttons["share-language-sample"].exists)
+    }
+
+    @MainActor
     func testHistoryCanBePausedFromSpeakAndPersistsAcrossRelaunch() {
         let app = XCUIApplication()
         app.launch()
         app.buttons["Settings"].firstMatch.tap()
         let saveHistory = app.switches["Save spoken messages on this device"]
-        for _ in 0..<6 {
+        for _ in 0..<20 {
             if saveHistory.isHittable { break }
             app.swipeUp()
         }
@@ -4448,9 +4997,27 @@ final class NavigationUITests: XCTestCase {
         app.buttons["toggle-history-pause"].tap()
         XCTAssertFalse(app.staticTexts["History paused"].exists)
 
+        app.buttons["Keyboard"].tap()
+        let typed = app.textViews["Type a message"]
+        let clear = app.buttons["Clear"]
+        if clear.isEnabled { clear.tap() }
+        typed.tap()
+        typed.typeText("Insights check \(UUID().uuidString.prefix(6))")
+        app.buttons["Speak text"].firstMatch.tap()
+        app.buttons["Phrases"].firstMatch.tap()
+        let recent = app.buttons["Recent messages"]
+        for _ in 0..<6 where !recent.isHittable { app.swipeUp() }
+        XCTAssertTrue(recent.isHittable)
+        recent.tap()
+        let insights = app.buttons["open-message-insights"]
+        XCTAssertTrue(insights.waitForExistence(timeout: 5))
+        insights.tap()
+        XCTAssertTrue(app.navigationBars["Message insights"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.descendants(matching: .any)["message-insights-summary"].exists)
+
         app.buttons["Settings"].firstMatch.tap()
         let resetHistory = app.switches["Save spoken messages on this device"]
-        for _ in 0..<6 {
+        for _ in 0..<20 {
             if resetHistory.isHittable { break }
             app.swipeUp()
         }
@@ -4978,21 +5545,89 @@ final class NavigationUITests: XCTestCase {
         transcript.tap()
         transcript.typeText("water xylophonezz")
         XCTAssertTrue(app.otherElements["visual-message-preview"].exists)
-        app.buttons["visual-message-part-0"].tap()
+        let choosePicture = app.buttons["visual-message-choose-first-picture"]
+        XCTAssertTrue(choosePicture.waitForExistence(timeout: 5))
+        choosePicture.tap()
+        XCTAssertTrue(app.navigationBars["Choose picture"].waitForExistence(timeout: 5))
+        app.buttons["visual-picture-arasaac"].tap()
+        let arasaacSearch = app.navigationBars["ARASAAC pictograms"]
+        XCTAssertTrue(arasaacSearch.waitForExistence(timeout: 5))
+        app.buttons["Cancel"].tap()
+        let searchDismissed = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "exists == false"), object: arasaacSearch)
+        XCTAssertEqual(XCTWaiter.wait(for: [searchDismissed], timeout: 5), .completed)
         XCTAssertTrue(app.navigationBars["Choose picture"].waitForExistence(timeout: 5))
         let pictureSearch = app.searchFields["Find a picture button"]
         pictureSearch.tap()
         pictureSearch.typeText("help")
-        app.buttons["Use help picture"].firstMatch.tap()
-        XCTAssertEqual(app.buttons["visual-message-part-0"].value as? String, "Picture from help")
-        app.buttons["visual-message-add"].tap()
+        let searchKey = app.keyboards.buttons["Search"].firstMatch
+        if searchKey.exists { searchKey.tap() }
+        else if app.keyboards.buttons["Done"].firstMatch.exists {
+            app.keyboards.buttons["Done"].firstMatch.tap()
+        }
+        let helpPicture = app.buttons["Use help picture"].firstMatch
+        XCTAssertTrue(helpPicture.waitForExistence(timeout: 5))
+        XCTAssertTrue(helpPicture.isHittable)
+        helpPicture.tap()
+        let reviewedPart = app.buttons["visual-message-part-0"]
+        let pictureUpdated = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "value == %@", "Picture from help"), object: reviewedPart)
+        XCTAssertEqual(XCTWaiter.wait(for: [pictureUpdated], timeout: 5), .completed)
+        let addToMessage = app.buttons["visual-message-add"]
+        for _ in 0..<3 where !addToMessage.isHittable { app.swipeUp() }
+        XCTAssertTrue(addToMessage.isHittable)
+        addToMessage.tap()
         XCTAssertTrue(app.staticTexts["Message: water xylophonezz"].waitForExistence(timeout: 5))
+    }
+
+    @MainActor
+    func testSpeechToPicturesCanChooseARASAACPictogram() {
+        let app = XCUIApplication()
+        app.launch()
+        if app.buttons["Clear message"].isEnabled { app.buttons["Clear message"].tap() }
+        app.buttons["Customize"].tap()
+        app.buttons["Speech to pictures"].tap()
+        let transcript = app.descendants(matching: .any)["visual-message-transcript"]
+        XCTAssertTrue(transcript.waitForExistence(timeout: 5))
+        transcript.tap()
+        transcript.typeText("water")
+        let choosePicture = app.buttons["visual-message-choose-first-picture"]
+        XCTAssertTrue(choosePicture.waitForExistence(timeout: 5))
+        choosePicture.tap()
+        let part = app.buttons["visual-message-part-0"]
+        XCTAssertTrue(app.navigationBars["Choose picture"].waitForExistence(timeout: 5))
+        app.buttons["visual-picture-arasaac"].tap()
+        XCTAssertTrue(app.navigationBars["ARASAAC pictograms"].waitForExistence(timeout: 5))
+        let result = app.buttons.matching(NSPredicate(
+            format: "identifier BEGINSWITH %@", "arasaac-result-")).firstMatch
+        guard result.waitForExistence(timeout: 15) else {
+            XCTFail("ARASAAC results did not appear: \(app.debugDescription)")
+            return
+        }
+        result.tap()
+        let selected = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "value == %@", "ARASAAC pictogram"), object: part)
+        XCTAssertEqual(XCTWaiter.wait(for: [selected], timeout: 10), .completed)
+        let picker = app.navigationBars["Choose picture"]
+        let pickerDismissed = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "exists == false"), object: picker)
+        XCTAssertEqual(XCTWaiter.wait(for: [pickerDismissed], timeout: 5), .completed)
+        let add = app.buttons["visual-message-add"]
+        XCTAssertTrue(add.waitForExistence(timeout: 5))
+        for _ in 0..<3 where !add.isHittable { app.swipeUp() }
+        XCTAssertTrue(add.isHittable)
+        add.tap()
+        XCTAssertTrue(app.staticTexts["Message: water"].waitForExistence(timeout: 5))
     }
 
     @MainActor
     func testFocusHighlightsTargetsWithoutHidingOtherWords() {
         let app = XCUIApplication()
         app.launch()
+        app.buttons["Core"].firstMatch.tap()
+        let boardTabs = app.scrollViews["board-tabs"]
+        XCTAssertTrue(boardTabs.exists)
+        for _ in 0..<3 { boardTabs.swipeRight() }
         app.buttons["open-focus"].tap()
         let word = app.buttons["Focus word I"]
         XCTAssertTrue(word.waitForExistence(timeout: 5))
@@ -5010,7 +5645,9 @@ final class NavigationUITests: XCTestCase {
 
         app.terminate()
         app.launch()
+        app.buttons["Core"].firstMatch.tap()
         XCTAssertNotEqual(app.buttons["I"].firstMatch.value as? String, "Focus word")
+        for _ in 0..<3 { boardTabs.swipeRight() }
         app.buttons["open-focus"].tap()
         XCTAssertEqual(app.buttons["Focus word I"].value as? String, "Selected")
     }
@@ -5048,22 +5685,40 @@ final class NavigationUITests: XCTestCase {
     @MainActor
     func testContextualBoardHintsHighlightWordsInPlace() {
         let app = XCUIApplication()
+        defer {
+            if app.state == .runningForeground { app.terminate() }
+            app.launchArguments = ["-ui-test-board-hints-cleanup"]
+            app.launch()
+            app.terminate()
+        }
+        app.launchArguments.append("-ui-test-board-hints")
         app.launch()
+        let core = app.buttons["Core"].firstMatch
+        XCTAssertTrue(core.waitForExistence(timeout: 5))
+        core.tap()
         let clear = app.buttons["Clear message"]
         if clear.isEnabled { clear.tap() }
         let toggle = app.buttons["board-suggestion-toggle"]
         XCTAssertTrue(toggle.waitForExistence(timeout: 5))
+        let boardTabs = app.scrollViews["board-tabs"]
+        XCTAssertTrue(boardTabs.exists)
+        for _ in 0..<3 { boardTabs.swipeRight() }
         if toggle.label == "Hints" { toggle.tap() }
+        XCTAssertEqual(toggle.label, "Hints on")
 
         app.buttons["I"].firstMatch.tap()
+        XCTAssertTrue(app.staticTexts["Message: I"].waitForExistence(timeout: 5))
         let want = app.buttons["want"].firstMatch
         XCTAssertTrue(want.waitForExistence(timeout: 5))
-        XCTAssertEqual(want.value as? String, "Suggested next")
+        let suggested = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "value == %@", "Suggested next"), object: want)
+        XCTAssertEqual(XCTWaiter.wait(for: [suggested], timeout: 5), .completed)
         let highlightedScreenshot = XCTAttachment(screenshot: app.screenshot())
         highlightedScreenshot.name = "Picture board next-word hints"
         highlightedScreenshot.lifetime = .keepAlways
         add(highlightedScreenshot)
         let position = want.frame.origin
+        for _ in 0..<3 { boardTabs.swipeRight() }
         toggle.tap()
         XCTAssertEqual(want.value as? String, "")
         XCTAssertEqual(want.frame.origin.x, position.x, accuracy: 1)
@@ -5228,7 +5883,10 @@ final class NavigationUITests: XCTestCase {
         let app = XCUIApplication()
         app.launch()
         app.buttons["Customize"].tap()
-        app.buttons["Call audio"].tap()
+        let callAudio = app.buttons["Call audio"]
+        for _ in 0..<8 where !callAudio.exists { app.swipeUp() }
+        XCTAssertTrue(callAudio.waitForExistence(timeout: 5))
+        callAudio.tap()
         XCTAssertTrue(app.navigationBars["Call audio"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.staticTexts["Status"].exists)
         XCTAssertTrue(app.buttons["call-audio-toggle"].exists
@@ -5263,12 +5921,20 @@ final class NavigationUITests: XCTestCase {
         alertScreenshot.lifetime = .keepAlways
         add(alertScreenshot)
         app.buttons["repeat-attention"].tap()
+        let autoRepeat = app.buttons["attention-auto-repeat"]
+        XCTAssertEqual(autoRepeat.label, "Repeat until stopped")
+        autoRepeat.tap()
+        XCTAssertEqual(autoRepeat.label, "Stop repeating")
+        XCTAssertFalse(app.buttons["repeat-attention"].isEnabled)
+        autoRepeat.tap()
+        XCTAssertEqual(autoRepeat.label, "Repeat until stopped")
         app.buttons["Done"].tap()
 
         app.buttons["Keyboard"].tap()
         XCTAssertTrue(attention.waitForExistence(timeout: 5))
         attention.tap()
         XCTAssertTrue(app.staticTexts["attention-message"].waitForExistence(timeout: 5))
+        XCTAssertEqual(app.buttons["attention-auto-repeat"].label, "Repeat until stopped")
     }
 
     @MainActor
@@ -5602,6 +6268,7 @@ final class NavigationUITests: XCTestCase {
         XCTAssertTrue(scene.waitForExistence(timeout: 5))
         scene.tap()
         XCTAssertTrue(app.navigationBars["Literacy scene"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["quick-response-yes"].exists)
         let showOnTap = app.buttons["scene-label-onTap"]
         XCTAssertTrue(showOnTap.waitForExistence(timeout: 5))
         showOnTap.tap()
@@ -5786,6 +6453,36 @@ final class NavigationUITests: XCTestCase {
     }
 
     @MainActor
+    func testPhotoBoardWordsAreReviewedAndSavedAsSceneMarkers() {
+        let app = XCUIApplication()
+        app.launchArguments = ["-ui-test-photo-board"]
+        app.launch()
+        defer {
+            app.terminate()
+            app.launchArguments = ["-ui-test-photo-board-cleanup"]
+            app.launch()
+        }
+        app.buttons["open-scenes"].tap()
+        app.swipeUp()
+        app.buttons["Options for Photo words test scene"].tap()
+        app.buttons["Edit"].tap()
+        XCTAssertTrue(app.navigationBars["Edit scene"].waitForExistence(timeout: 5))
+        let findWords = app.buttons["scene-find-photo-words"]
+        for _ in 0..<3 where !findWords.isHittable { app.swipeUp() }
+        findWords.tap()
+        XCTAssertTrue(app.navigationBars["Review photo words"].waitForExistence(timeout: 20))
+        let reviewFields = app.textFields.matching(NSPredicate(format: "identifier BEGINSWITH %@", "photo-board-word-"))
+        XCTAssertGreaterThanOrEqual(reviewFields.count, 2)
+        app.buttons["add-reviewed-photo-words"].tap()
+        app.buttons["save-scene"].tap()
+        let open = app.buttons["Open Photo words test scene scene"]
+        XCTAssertTrue(open.waitForExistence(timeout: 5))
+        open.tap()
+        XCTAssertTrue(app.buttons["HELP"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["WATER"].exists)
+    }
+
+    @MainActor
     func testCustomizedSceneHotspotsOfferControlsAndRespectIndependentActions() {
         let app = XCUIApplication()
         app.launchArguments.append("-ui-test-scene-hotspots")
@@ -5804,7 +6501,14 @@ final class NavigationUITests: XCTestCase {
         XCTAssertTrue(app.sliders.matching(NSPredicate(format: "identifier BEGINSWITH %@", "scene-height-")).firstMatch.exists)
         XCTAssertTrue(app.switches.matching(NSPredicate(format: "identifier BEGINSWITH %@", "scene-show-label-")).firstMatch.exists)
         XCTAssertTrue(app.textFields.matching(NSPredicate(format: "identifier BEGINSWITH %@", "scene-spoken-text-")).firstMatch.exists)
-        app.buttons["Cancel"].tap()
+        let voice = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "scene-record-voice-")).firstMatch
+        XCTAssertTrue(voice.waitForExistence(timeout: 5))
+        for _ in 0..<3 where !voice.isHittable { app.swipeUp() }
+        voice.tap()
+        XCTAssertTrue(app.navigationBars["Scene voice"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["scene-voice-record-toggle"].exists)
+        app.navigationBars["Scene voice"].buttons["Cancel"].tap()
+        app.navigationBars["Edit scene"].buttons["Cancel"].tap()
 
         let open = app.buttons["Open Hotspot test scene scene"]
         XCTAssertTrue(open.waitForExistence(timeout: 5))
@@ -6440,17 +7144,51 @@ final class NavigationUITests: XCTestCase {
     }
 
     @MainActor
+    func testCommunicationPassportPDFCanBePreviewedAndPrinted() {
+        let app = XCUIApplication()
+        app.launch()
+        app.buttons["Settings"].firstMatch.tap()
+        app.buttons["My communication passport"].tap()
+        if app.buttons["Create my passport"].exists {
+            app.buttons["Create my passport"].tap()
+        } else {
+            app.buttons["Edit"].tap()
+        }
+        let name = app.textFields["passport-name"]
+        XCTAssertTrue(name.waitForExistence(timeout: 5))
+        name.tap()
+        name.typeText("Alex")
+        app.buttons["Save"].tap()
+
+        let preview = app.buttons["passport-pdf"]
+        XCTAssertTrue(preview.waitForExistence(timeout: 5))
+        preview.tap()
+        XCTAssertTrue(app.navigationBars["Passport PDF"].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.buttons["share-pdf"].exists)
+        XCTAssertTrue(app.buttons["Save PDF"].exists)
+        XCTAssertTrue(app.buttons["Print"].exists)
+    }
+
+    @MainActor
     func testScanningCanChooseBoardAndWord() {
         let app = XCUIApplication()
         app.launch()
         app.buttons["Settings"].firstMatch.tap()
         let scanSwitch = app.switches["Scan the communication board"]
-        for _ in 0..<4 where !scanSwitch.exists { app.swipeUp() }
-        XCTAssertTrue(scanSwitch.waitForExistence(timeout: 5))
+        for _ in 0..<5 where !scanSwitch.isHittable { app.swipeUp() }
+        XCTAssertTrue(scanSwitch.isHittable)
         if String(describing: scanSwitch.value ?? "") != "1" {
             scanSwitch.switches.firstMatch.tap()
         }
         XCTAssertEqual(String(describing: scanSwitch.value ?? ""), "1")
+        let mode = app.descendants(matching: .any)["scanning-mode"]
+        for _ in 0..<5 where !mode.isHittable { app.swipeUp() }
+        mode.tap()
+        app.buttons["Auto"].firstMatch.tap()
+        let pattern = app.descendants(matching: .any)["scanning-pattern"]
+        for _ in 0..<5 where !pattern.isHittable { app.swipeUp() }
+        pattern.tap()
+        app.buttons["One at a time"].firstMatch.tap()
         app.buttons.matching(identifier: "quote.bubble.fill").firstMatch.tap()
         let clearMessage = app.buttons["Clear message"]
         if clearMessage.isEnabled { clearMessage.tap() }
@@ -6502,6 +7240,9 @@ final class NavigationUITests: XCTestCase {
         let target = app.staticTexts["scan-target"]
         XCTAssertTrue(target.waitForExistence(timeout: 15))
         XCTAssertTrue(app.buttons["I"].exists)
+        let pageCount = app.staticTexts["board-page-count"]
+        XCTAssertTrue(pageCount.exists)
+        XCTAssertTrue(pageCount.label.hasPrefix("Page 1 of "))
         XCTAssertLessThan(Date().timeIntervalSince(started), 30)
 
         let first = target.label
@@ -6738,6 +7479,48 @@ final class NavigationUITests: XCTestCase {
         }
         app.buttons["Speak"].firstMatch.tap()
         XCTAssertTrue(want.exists)
+    }
+
+    @MainActor
+    func testButtonTextAndSpacingOverridesCanBeSavedInEditor() {
+        let app = XCUIApplication()
+        defer {
+            if app.state == .runningForeground { app.terminate() }
+            app.launchArguments = ["-ui-test-tile-appearance-cleanup"]
+            app.launch()
+            app.terminate()
+        }
+        app.launchArguments = ["-ui-test-tile-appearance"]
+        app.launch()
+        app.buttons["Customize"].tap()
+        app.buttons["Edit words"].tap()
+        let search = app.textFields["word-manager-search"]
+        XCTAssertTrue(search.waitForExistence(timeout: 5))
+        search.tap()
+        search.typeText("want\n")
+        app.buttons["Edit want"].firstMatch.tap()
+
+        let paddingToggle = app.switches["button-custom-padding"]
+        for _ in 0..<4 where !paddingToggle.isHittable { app.swipeUp() }
+        XCTAssertTrue(paddingToggle.isHittable)
+        paddingToggle.coordinate(withNormalizedOffset: CGVector(dx: 0.9, dy: 0.5)).tap()
+        XCTAssertEqual(String(describing: paddingToggle.value ?? ""), "1")
+        app.navigationBars["Edit button"].buttons["Save"].tap()
+
+        app.buttons["Edit want"].firstMatch.tap()
+        for _ in 0..<4 where !paddingToggle.isHittable { app.swipeUp() }
+        XCTAssertTrue(paddingToggle.isHittable)
+        XCTAssertEqual(String(describing: app.switches["button-custom-padding"].value ?? ""), "1")
+        let labelToggle = app.switches["button-custom-label-size"]
+        XCTAssertTrue(labelToggle.isHittable)
+        labelToggle.coordinate(withNormalizedOffset: CGVector(dx: 0.9, dy: 0.5)).tap()
+        XCTAssertEqual(String(describing: labelToggle.value ?? ""), "1")
+        app.navigationBars["Edit button"].buttons["Save"].tap()
+
+        app.buttons["Edit want"].firstMatch.tap()
+        for _ in 0..<4 where !labelToggle.isHittable { app.swipeUp() }
+        XCTAssertTrue(labelToggle.isHittable)
+        XCTAssertEqual(String(describing: labelToggle.value ?? ""), "1")
     }
 
     @MainActor
@@ -7442,6 +8225,29 @@ final class NavigationUITests: XCTestCase {
     }
 
     @MainActor
+    func testChoiceBoardQuickReplyKeepsSessionOpen() {
+        let app = XCUIApplication()
+        app.launchArguments.append("-ui-test-routine-choice")
+        app.launch()
+        app.buttons["Choice boards"].tap()
+        let open = app.buttons["Open Bus choices"]
+        for _ in 0..<8 where !open.isHittable { app.swipeUp() }
+        XCTAssertTrue(open.waitForExistence(timeout: 5))
+        open.tap()
+        XCTAssertTrue(app.navigationBars["Make a choice"].waitForExistence(timeout: 5))
+        let quickReply = app.buttons["quick-response-yes"]
+        XCTAssertTrue(quickReply.waitForExistence(timeout: 5))
+        quickReply.tap()
+        XCTAssertTrue(app.buttons["choice-session-done"].exists)
+        app.buttons["Window seat"].tap()
+        XCTAssertEqual(app.staticTexts["selected-choice"].label, "Window seat")
+        let screenshot = XCTAttachment(screenshot: app.screenshot())
+        screenshot.name = "Choice session quick reply"
+        screenshot.lifetime = .keepAlways
+        add(screenshot)
+    }
+
+    @MainActor
     func testChoiceBoardStepScanReachesChoicesAlternativesAndNavigation() {
         let app = XCUIApplication()
         app.launchArguments += ["-ui-test-choice-scan"]
@@ -8110,6 +8916,27 @@ final class NavigationUITests: XCTestCase {
     }
 
     @MainActor
+    func testBoardButtonCanBeCopiedToAnotherBoardFromArrangeButtons() {
+        let app = XCUIApplication()
+        app.launch()
+        app.buttons["Speak"].firstMatch.tap()
+        app.buttons["Customize"].tap()
+        app.buttons["Arrange buttons"].tap()
+        let transfer = app.buttons["transfer-I"]
+        XCTAssertTrue(transfer.waitForExistence(timeout: 5))
+        transfer.tap()
+        app.buttons["Copy to board"].tap()
+        app.collectionViews.cells.buttons["Needs"].tap()
+        app.navigationBars["Arrange buttons"].buttons["Done"].tap()
+        app.buttons["Needs"].firstMatch.tap()
+        XCTAssertTrue(app.buttons["I"].firstMatch.waitForExistence(timeout: 5))
+        let screenshot = XCTAttachment(screenshot: app.screenshot())
+        screenshot.name = "Copied core word on Needs board"
+        screenshot.lifetime = .keepAlways
+        add(screenshot)
+    }
+
+    @MainActor
     func testPictureBoardFolderCanOpenItsBoardWithoutChangingBoardBar() {
         let app = XCUIApplication()
         app.launch()
@@ -8123,6 +8950,13 @@ final class NavigationUITests: XCTestCase {
         name.typeText("Everyday")
         app.alerts["New folder"].buttons["Create"].tap()
         XCTAssertTrue(app.staticTexts["Everyday"].waitForExistence(timeout: 5))
+        let folderOptions = app.descendants(matching: .any)["board-folder-options-Everyday"].firstMatch
+        XCTAssertTrue(folderOptions.waitForExistence(timeout: 5))
+        folderOptions.tap()
+        app.buttons["Folder voice"].tap()
+        XCTAssertTrue(app.navigationBars["Voice for Everyday"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["folder-voice-profile"].exists)
+        app.navigationBars["Voice for Everyday"].buttons["Done"].tap()
         let boardOptions = app.descendants(matching: .any)["board-options-Needs"].firstMatch
         for _ in 0..<6 where !boardOptions.exists { app.swipeUp() }
         XCTAssertTrue(boardOptions.waitForExistence(timeout: 5))
@@ -8591,6 +9425,166 @@ final class NavigationUITests: XCTestCase {
     }
 
     @MainActor
+    func testClipboardImageCanBecomePersonalButtonPhoto() {
+        let app = XCUIApplication()
+        app.launchArguments = ["-ui-test-paste-photo"]
+        app.launch()
+        app.buttons["Customize"].tap()
+        app.buttons["Add button"].tap()
+        let buttonName = "Clipboard picture \(UUID().uuidString.prefix(6))"
+        let label = app.textFields["Button label"]
+        XCTAssertTrue(label.waitForExistence(timeout: 5))
+        label.tap()
+        label.typeText(buttonName)
+        let paste = app.buttons["button-paste-photo"]
+        for _ in 0..<10 where !paste.isHittable { app.swipeUp() }
+        XCTAssertTrue(paste.isHittable)
+        paste.tap()
+        let removePhoto = app.buttons["Remove photo"]
+        for _ in 0..<5 where !removePhoto.exists { app.swipeUp() }
+        XCTAssertTrue(removePhoto.waitForExistence(timeout: 5))
+        let save = app.buttons["Save"]
+        expectation(for: NSPredicate(format: "enabled == true"), evaluatedWith: save)
+        waitForExpectations(timeout: 10)
+        save.tap()
+        XCTAssertFalse(app.navigationBars["Add button"].waitForExistence(timeout: 3))
+        let saved = app.buttons[buttonName].firstMatch
+        for _ in 0..<10 where !saved.exists { app.swipeUp() }
+        XCTAssertTrue(saved.waitForExistence(timeout: 5))
+        XCTAssertTrue(saved.images.firstMatch.exists)
+    }
+
+    @MainActor
+    func testPersonalPictureLibraryReusesPhotoOnAnotherButton() {
+        let app = XCUIApplication()
+        app.launch()
+        app.buttons["Customize"].tap()
+        app.buttons["Add button"].tap()
+        let sourceName = "My cup photo \(UUID().uuidString.prefix(6))"
+        let pictureTitle = "Cup \(UUID().uuidString.prefix(6))"
+        let sourceLabel = app.textFields["Button label"]
+        XCTAssertTrue(sourceLabel.waitForExistence(timeout: 5))
+        sourceLabel.tap()
+        sourceLabel.typeText(sourceName)
+        let library = app.buttons["button-picture-library"]
+        for _ in 0..<10 where !library.isHittable { app.swipeUp() }
+        library.tap()
+        app.buttons["picture-library-create-text"].tap()
+        let content = app.descendants(matching: .any)["picture-library-text-content"].firstMatch
+        XCTAssertTrue(content.waitForExistence(timeout: 5))
+        content.tap()
+        content.typeText(pictureTitle)
+        app.navigationBars["Create picture"].buttons["Create"].tap()
+        let savedPicture = app.buttons["library-picture-\(pictureTitle)"]
+        XCTAssertTrue(savedPicture.waitForExistence(timeout: 8))
+        savedPicture.tap()
+        let removeFirstPhoto = app.buttons["Remove photo"]
+        for _ in 0..<8 where !removeFirstPhoto.exists { app.swipeUp() }
+        XCTAssertTrue(removeFirstPhoto.waitForExistence(timeout: 5))
+        app.navigationBars["Add button"].buttons["Save"].tap()
+
+        app.buttons["Customize"].tap()
+        app.buttons["Add button"].tap()
+        let reusedName = "Picture from library \(UUID().uuidString.prefix(6))"
+        let newLabel = app.textFields["Button label"]
+        newLabel.tap()
+        newLabel.typeText(reusedName)
+        for _ in 0..<10 where !library.isHittable { app.swipeUp() }
+        library.tap()
+        XCTAssertTrue(savedPicture.waitForExistence(timeout: 8))
+        savedPicture.tap()
+        let removeReusedPhoto = app.buttons["Remove photo"]
+        for _ in 0..<8 where !removeReusedPhoto.exists { app.swipeUp() }
+        XCTAssertTrue(removeReusedPhoto.waitForExistence(timeout: 5))
+        app.navigationBars["Add button"].buttons["Save"].tap()
+        let reused = app.buttons[reusedName].firstMatch
+        for _ in 0..<10 where !reused.exists { app.swipeUp() }
+        XCTAssertTrue(reused.waitForExistence(timeout: 5))
+        XCTAssertTrue(reused.images.firstMatch.exists)
+    }
+
+    @MainActor
+    func testPersonalPictureLibraryReusesPhotoAcrossRoutineAndPhrase() {
+        let app = XCUIApplication()
+        app.launch()
+        app.buttons["Routine"].firstMatch.tap()
+        app.buttons["routine-add-detailed-step"].tap()
+        let stepName = "Cup routine \(UUID().uuidString.prefix(6))"
+        let title = app.textFields["routine-step-title"]
+        XCTAssertTrue(title.waitForExistence(timeout: 5))
+        title.tap()
+        title.typeText(stepName)
+        let routineLibrary = app.buttons["routine-step-picture-library"]
+        for _ in 0..<8 where !routineLibrary.isHittable { app.swipeUp() }
+        XCTAssertTrue(routineLibrary.waitForExistence(timeout: 5))
+        routineLibrary.tap()
+        app.buttons["picture-library-create-text"].tap()
+        let pictureTitle = "Cup \(UUID().uuidString.prefix(6))"
+        let content = app.descendants(matching: .any)["picture-library-text-content"].firstMatch
+        XCTAssertTrue(content.waitForExistence(timeout: 5))
+        content.tap()
+        content.typeText(pictureTitle)
+        app.navigationBars["Create picture"].buttons["Create"].tap()
+        let savedPicture = app.buttons["library-picture-\(pictureTitle)"]
+        XCTAssertTrue(savedPicture.waitForExistence(timeout: 8))
+        savedPicture.tap()
+        let removeRoutinePhoto = app.buttons["Remove photo"]
+        for _ in 0..<8 where !removeRoutinePhoto.exists { app.swipeUp() }
+        XCTAssertTrue(removeRoutinePhoto.waitForExistence(timeout: 5))
+        app.buttons["save-routine-step"].tap()
+
+        app.buttons["Phrases"].firstMatch.tap()
+        let phrase = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "I need a break.")).firstMatch
+        for _ in 0..<6 where !phrase.exists { app.swipeUp() }
+        XCTAssertTrue(phrase.waitForExistence(timeout: 5))
+        phrase.press(forDuration: 0.8)
+        app.buttons["Edit phrase"].tap()
+        let phraseLibrary = app.buttons["phrase-picture-library"]
+        for _ in 0..<8 where !phraseLibrary.isHittable { app.swipeUp() }
+        XCTAssertTrue(phraseLibrary.waitForExistence(timeout: 5))
+        phraseLibrary.tap()
+        XCTAssertTrue(savedPicture.waitForExistence(timeout: 8))
+        savedPicture.tap()
+        XCTAssertTrue(app.images["Phrase picture"].waitForExistence(timeout: 5))
+        app.buttons["Save"].tap()
+    }
+
+    @MainActor
+    func testStarterGalleryPictureCanBecomeAButton() {
+        let app = XCUIApplication()
+        app.launch()
+        app.buttons["Customize"].tap()
+        app.buttons["Add button"].tap()
+        let label = "Gallery water \(UUID().uuidString.prefix(6))"
+        let buttonLabel = app.textFields["Button label"]
+        XCTAssertTrue(buttonLabel.waitForExistence(timeout: 5))
+        buttonLabel.tap()
+        buttonLabel.typeText(label)
+        let library = app.buttons["button-picture-library"]
+        for _ in 0..<8 where !library.isHittable { app.swipeUp() }
+        library.tap()
+        app.buttons["picture-library-starter-gallery"].tap()
+        let search = app.searchFields["Find a starter picture"]
+        XCTAssertTrue(search.waitForExistence(timeout: 5))
+        search.tap()
+        search.typeText("water")
+        let starterWater = app.buttons["starter-gallery-Needs-water"]
+        XCTAssertTrue(starterWater.waitForExistence(timeout: 5))
+        starterWater.tap()
+        let savedWater = app.buttons["library-picture-water"]
+        XCTAssertTrue(savedWater.waitForExistence(timeout: 8))
+        savedWater.tap()
+        let removePhoto = app.buttons["Remove photo"]
+        for _ in 0..<8 where !removePhoto.exists { app.swipeUp() }
+        XCTAssertTrue(removePhoto.waitForExistence(timeout: 5))
+        app.navigationBars["Add button"].buttons["Save"].tap()
+        let newButton = app.buttons[label].firstMatch
+        for _ in 0..<8 where !newButton.exists { app.swipeUp() }
+        XCTAssertTrue(newButton.waitForExistence(timeout: 5))
+        XCTAssertTrue(newButton.images.firstMatch.exists)
+    }
+
+    @MainActor
     func testARASAACPictogramCanBeAddedToPersonalButton() {
         let app = XCUIApplication()
         app.launch()
@@ -8614,5 +9608,68 @@ final class NavigationUITests: XCTestCase {
         XCTAssertTrue(attribution.waitForExistence(timeout: 20))
         app.buttons["Save"].tap()
         XCTAssertFalse(app.navigationBars["Add button"].waitForExistence(timeout: 3))
+    }
+
+    @MainActor
+    func testARASAACPictogramCanBeSavedToPhotos() {
+        let app = XCUIApplication()
+        app.launch()
+        app.buttons["Customize"].tap()
+        app.buttons["Add button"].tap()
+        let label = app.textFields["Button label"]
+        XCTAssertTrue(label.waitForExistence(timeout: 5))
+        label.tap()
+        label.typeText("water")
+        let search = app.buttons["button-search-arasaac"]
+        for _ in 0..<10 where !search.isHittable { app.swipeUp() }
+        XCTAssertTrue(search.isHittable)
+        search.tap()
+        XCTAssertTrue(app.navigationBars["ARASAAC pictograms"].waitForExistence(timeout: 5))
+        let save = app.buttons.matching(NSPredicate(
+            format: "identifier BEGINSWITH %@", "arasaac-save-photo-")).firstMatch
+        XCTAssertTrue(save.waitForExistence(timeout: 30))
+        save.tap()
+        let confirmation = app.staticTexts["arasaac-photo-save-message"]
+        XCTAssertTrue(confirmation.waitForExistence(timeout: 30))
+        XCTAssertEqual(confirmation.label,
+                       "Saved to Photos. Credit Sergio Palao / ARASAAC when you reuse this pictogram.")
+    }
+
+    @MainActor
+    func testCommunicationUseCanBeRecordedReviewedAndCleared() {
+        let app = XCUIApplication()
+        app.launchArguments = ["-ui-test-communication-use"]
+        app.launch()
+        defer {
+            app.terminate()
+            app.launchArguments = ["-ui-test-communication-use-cleanup"]
+            app.launch()
+        }
+
+        app.buttons["Settings"].firstMatch.tap()
+        let toggle = app.switches["record-communication-use"]
+        for _ in 0..<20 where !toggle.isHittable { app.swipeUp() }
+        XCTAssertTrue(toggle.isHittable)
+        if toggle.value as? String == "0" {
+            toggle.coordinate(withNormalizedOffset: CGVector(dx: 0.9, dy: 0.5)).tap()
+        }
+        XCTAssertEqual(toggle.value as? String, "1")
+
+        app.buttons["Speak"].firstMatch.tap()
+        let word = app.buttons["I"].firstMatch
+        XCTAssertTrue(word.waitForExistence(timeout: 5))
+        word.tap()
+
+        app.buttons["Settings"].firstMatch.tap()
+        let review = app.buttons["review-communication-use"]
+        for _ in 0..<20 where !review.isHittable { app.swipeUp() }
+        XCTAssertTrue(review.isHittable)
+        review.tap()
+        XCTAssertTrue(app.staticTexts["1 recent selections for Communication use UI test. Recording is on."]
+            .waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["export-communication-use"].exists)
+        app.buttons["clear-communication-use"].tap()
+        app.buttons["Delete records"].tap()
+        XCTAssertTrue(app.staticTexts["No selections recorded yet."].waitForExistence(timeout: 5))
     }
 }

@@ -5,10 +5,16 @@ struct WeeklyActivity: Identifiable, Codable, Equatable {
     var option: ChoiceOption
     var completedOn: Date? = nil
     var completedDates: [Date]? = nil
+    var rewardChartID: UUID? = nil
+    var rewardedDates: [Date]? = nil
 
     func isComplete(on date: Date, calendar: Calendar = .current) -> Bool {
         if let completedOn, calendar.isDate(completedOn, inSameDayAs: date) { return true }
         return completedDates?.contains { calendar.isDate($0, inSameDayAs: date) } == true
+    }
+
+    func hasEarnedReward(on date: Date, calendar: Calendar = .current) -> Bool {
+        rewardedDates?.contains { calendar.isDate($0, inSameDayAs: date) } == true
     }
 }
 
@@ -22,14 +28,17 @@ struct WeeklyPlanTemplate: Identifiable, Codable, Equatable {
     var title: String
     var options: [ChoiceOption]
     var reminderSpecs: [WeeklyTemplateReminder] = []
+    var rewardChartIDs: [UUID?] = []
 
-    init(title: String, options: [ChoiceOption], reminderSpecs: [WeeklyTemplateReminder] = []) {
+    init(title: String, options: [ChoiceOption], reminderSpecs: [WeeklyTemplateReminder] = [],
+         rewardChartIDs: [UUID?] = []) {
         self.title = title
         self.options = options
         self.reminderSpecs = reminderSpecs
+        self.rewardChartIDs = rewardChartIDs
     }
 
-    private enum CodingKeys: String, CodingKey { case id, title, options, reminderSpecs }
+    private enum CodingKeys: String, CodingKey { case id, title, options, reminderSpecs, rewardChartIDs }
 
     init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
@@ -37,6 +46,7 @@ struct WeeklyPlanTemplate: Identifiable, Codable, Equatable {
         title = try values.decode(String.self, forKey: .title)
         options = try values.decode([ChoiceOption].self, forKey: .options)
         reminderSpecs = try values.decodeIfPresent([WeeklyTemplateReminder].self, forKey: .reminderSpecs) ?? []
+        rewardChartIDs = try values.decodeIfPresent([UUID?].self, forKey: .rewardChartIDs) ?? []
     }
 }
 
@@ -147,6 +157,36 @@ struct WeeklyPlan: Codable, Equatable {
     }
 
     @discardableResult
+    mutating func markRewarded(id: UUID, on weekday: Int, date: Date,
+                              calendar: Calendar = .current) -> Bool {
+        guard let dayIndex = days.firstIndex(where: { $0.weekday == weekday }),
+              let activityIndex = days[dayIndex].activities.firstIndex(where: { $0.id == id }),
+              days[dayIndex].activities[activityIndex].isComplete(on: date, calendar: calendar),
+              !days[dayIndex].activities[activityIndex].hasEarnedReward(on: date, calendar: calendar)
+        else { return false }
+        days[dayIndex].activities[activityIndex].rewardedDates =
+            (days[dayIndex].activities[activityIndex].rewardedDates ?? []) + [calendar.startOfDay(for: date)]
+        return true
+    }
+
+    mutating func removeMissingRewardCharts(validIDs: Set<UUID>) {
+        for dayIndex in days.indices {
+            for activityIndex in days[dayIndex].activities.indices {
+                if let id = days[dayIndex].activities[activityIndex].rewardChartID,
+                   !validIDs.contains(id) {
+                    days[dayIndex].activities[activityIndex].rewardChartID = nil
+                    days[dayIndex].activities[activityIndex].rewardedDates = nil
+                }
+            }
+        }
+        for index in templates.indices {
+            templates[index].rewardChartIDs = templates[index].rewardChartIDs.map { id in
+                id.flatMap { validIDs.contains($0) ? $0 : nil }
+            }
+        }
+    }
+
+    @discardableResult
     mutating func move(on weekday: Int, from source: IndexSet, to destination: Int) -> Bool {
         guard let index = days.firstIndex(where: { $0.weekday == weekday }),
               destination >= 0, destination <= days[index].activities.count,
@@ -164,7 +204,7 @@ struct WeeklyPlan: Codable, Equatable {
               let sourceIndex = days.firstIndex(where: { $0.weekday == source }),
               let targetIndex = days.firstIndex(where: { $0.weekday == destination }) else { return false }
         let sourceActivities = days[sourceIndex].activities
-        let copied = sourceActivities.map { WeeklyActivity(option: $0.option) }
+        let copied = sourceActivities.map { WeeklyActivity(option: $0.option, rewardChartID: $0.rewardChartID) }
         reminders.removeAll { $0.weekday == destination }
         for (sourceActivity, copiedActivity) in zip(sourceActivities, copied) {
             if let reminder = reminders.first(where: { $0.weekday == source && $0.activityID == sourceActivity.id }) {
@@ -188,7 +228,9 @@ struct WeeklyPlan: Codable, Equatable {
             return WeeklyTemplateReminder(activityIndex: index, hour: reminder.hour,
                                           minute: reminder.minute, playsSound: reminder.playsSound)
         }
-        templates.append(WeeklyPlanTemplate(title: clean, options: options, reminderSpecs: reminderSpecs))
+        templates.append(WeeklyPlanTemplate(title: clean, options: options,
+                                            reminderSpecs: reminderSpecs,
+                                            rewardChartIDs: activities(on: weekday).map(\.rewardChartID)))
         return true
     }
 
@@ -196,7 +238,11 @@ struct WeeklyPlan: Codable, Equatable {
     mutating func applyTemplate(id: UUID, to weekday: Int) -> Bool {
         guard let template = templates.first(where: { $0.id == id }),
               let dayIndex = days.firstIndex(where: { $0.weekday == weekday }) else { return false }
-        let applied = template.options.map { WeeklyActivity(option: $0) }
+        let applied = template.options.enumerated().map { index, option in
+            WeeklyActivity(option: option,
+                           rewardChartID: template.rewardChartIDs.indices.contains(index)
+                           ? template.rewardChartIDs[index] : nil)
+        }
         reminders.removeAll { $0.weekday == weekday }
         for spec in template.reminderSpecs where applied.indices.contains(spec.activityIndex) {
             let reminder = WeeklyActivityReminder(activityID: applied[spec.activityIndex].id, weekday: weekday,

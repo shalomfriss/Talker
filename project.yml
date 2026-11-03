@@ -40,6 +40,7 @@ targets:
       properties:
         NSMicrophoneUsageDescription: Record personal voices and spoken choices for communication.
         NSCameraUsageDescription: Take personal photos for communication buttons, routines, scenes, stories, and calendars, and scan shared page QR codes.
+        NSPhotoLibraryAddUsageDescription: Save selected pictograms to Photos so they can be used in other communication apps.
         NSMicrophoneInjectionUsageDescription: Add Open Voice speech to a call when you choose to use call audio.
         NSFaceIDUsageDescription: Use device authentication to leave board-only communicator mode.
         NSSpeechRecognitionUsageDescription: Turn spoken choices into editable text using on-device speech recognition.

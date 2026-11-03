@@ -15,10 +15,10 @@ struct ScenePhotoCanvas<Marker: View>: View {
                         .frame(width: geometry.size.width, height: geometry.size.height)
                         .clipped()
                         .accessibilityHidden(true)
-                } else if let image = UIImage(data: imageData) {
-                    Image(uiImage: image)
-                        .resizable()
-                        .scaledToFill()
+                } else {
+                    AsyncThumbnailImage(data: imageData, maxPixelSize: 1200) {
+                        Color(uiColor: .secondarySystemBackground)
+                    }
                         .frame(width: geometry.size.width, height: geometry.size.height)
                         .clipped()
                         .accessibilityHidden(true)

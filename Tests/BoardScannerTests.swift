@@ -2,6 +2,19 @@ import XCTest
 @testable import OpenVoice
 
 final class BoardScannerTests: XCTestCase {
+    func testScanHighlightMatchesWordAndLinePositions() {
+        let first = UUID()
+        let second = UUID()
+        XCTAssertTrue(ScanTarget.word(first, "First").highlightsWord(id: first, position: 3, columns: 3))
+        XCTAssertFalse(ScanTarget.word(first, "First").highlightsWord(id: second, position: 3, columns: 3))
+        XCTAssertTrue(ScanTarget.line(.row, 1).highlightsWord(id: second, position: 4, columns: 3))
+        XCTAssertTrue(ScanTarget.line(.row, 1).highlightsLine(position: 5, columns: 3))
+        XCTAssertFalse(ScanTarget.line(.row, 1).highlightsLine(position: 2, columns: 3))
+        XCTAssertTrue(ScanTarget.line(.column, 2).highlightsWord(id: second, position: 5, columns: 3))
+        XCTAssertFalse(ScanTarget.line(.column, 2).highlightsLine(position: 4, columns: 3))
+        XCTAssertFalse(ScanTarget.quickWord(first, "First").highlightsWord(id: first, position: 0, columns: 3))
+    }
+
     func testPointerDwellNeedsStableHoverAndFiresOnlyOnceUntilLeave() {
         var dwell = PointerDwellState()
         XCTAssertTrue(dwell.moved(to: CGPoint(x: 20, y: 20)))

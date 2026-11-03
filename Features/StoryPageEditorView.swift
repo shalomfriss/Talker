@@ -9,6 +9,7 @@ struct StoryPageEditorView: View {
     let storyID: UUID
     let page: StoryPage?
     @State private var text: String
+    @State private var pendingPhotoPastes = 0
     @State private var symbol: String
     @State private var imageData: Data?
     @State private var additionalImageData: [Data]
@@ -71,15 +72,26 @@ struct StoryPageEditorView: View {
                         PhotosPicker(selection: $selectedPhoto, matching: .images) {
                             Label("Choose a photo", systemImage: "photo")
                         }
+                        PictureLibraryPickerButton(title: "Picture library",
+                                                   identifier: "story-page-picture-library") { picture in
+                            imageData = picture.imageData
+                            videoData = nil
+                            videoPosterData = nil
+                        }
                         CameraPhotoButton {
                             imageData = $0
                             videoData = nil
                             videoPosterData = nil
                         }
-                        if let imageData, let image = UIImage(data: imageData) {
-                            Image(uiImage: image)
-                                .resizable()
-                                .scaledToFit()
+                        PastePhotoButton(identifier: "story-page-paste-photo", onPastingChange: { pendingPhotoPastes += $0 ? 1 : -1 }) {
+                            imageData = $0
+                            videoData = nil
+                            videoPosterData = nil
+                        }
+                        if let imageData {
+                            AsyncThumbnailImage(data: imageData, maxPixelSize: 400, contentMode: .fit) {
+                                Color(uiColor: .secondarySystemBackground)
+                            }
                                 .frame(maxHeight: 180)
                             Button("Remove photo", role: .destructive) {
                                 self.imageData = additionalImageData.isEmpty
@@ -92,26 +104,36 @@ struct StoryPageEditorView: View {
                                     Label("Add more photos", systemImage: "photo.on.rectangle.angled")
                                 }
                                 .accessibilityIdentifier("story-add-more-photos")
+                                PictureLibraryPickerButton(title: "Add from picture library",
+                                                           identifier: "story-more-picture-library") { picture in
+                                    guard additionalImageData.count < 3 else { return }
+                                    additionalImageData.append(picture.imageData)
+                                }
                                 CameraPhotoButton(title: "Take another photo",
                                                   identifier: "story-take-more-photo") {
                                     guard additionalImageData.count < 3 else { return }
                                     additionalImageData.append($0)
                                 }
+                                PastePhotoButton(title: "Paste another image",
+                                                 identifier: "story-paste-more-photo",
+                                                 onPastingChange: { pendingPhotoPastes += $0 ? 1 : -1 }) {
+                                    guard additionalImageData.count < 3 else { return }
+                                    additionalImageData.append($0)
+                                }
                             }
                             ForEach(additionalImageData.indices, id: \.self) { index in
-                                if let preview = UIImage(data: additionalImageData[index]) {
-                                    HStack {
-                                        Image(uiImage: preview)
-                                            .resizable()
-                                            .scaledToFit()
-                                            .frame(width: 96, height: 76)
-                                        Text("Photo \(index + 2)")
-                                        Spacer()
-                                        Button("Remove", systemImage: "trash", role: .destructive) {
-                                            additionalImageData.remove(at: index)
-                                        }
-                                        .accessibilityIdentifier("story-remove-photo-\(index + 2)")
+                                HStack {
+                                    AsyncThumbnailImage(data: additionalImageData[index],
+                                                        maxPixelSize: 200, contentMode: .fit) {
+                                        Color(uiColor: .secondarySystemBackground)
                                     }
+                                    .frame(width: 96, height: 76)
+                                    Text("Photo \(index + 2)")
+                                    Spacer()
+                                    Button("Remove", systemImage: "trash", role: .destructive) {
+                                        additionalImageData.remove(at: index)
+                                    }
+                                    .accessibilityIdentifier("story-remove-photo-\(index + 2)")
                                 }
                             }
                         }
@@ -125,10 +147,10 @@ struct StoryPageEditorView: View {
                     }
                     .disabled(preparingVideo)
                     if preparingVideo { ProgressView("Preparing video") }
-                    if let poster = videoPosterData, let image = UIImage(data: poster) {
-                        Image(uiImage: image)
-                            .resizable()
-                            .scaledToFit()
+                    if let poster = videoPosterData {
+                        AsyncThumbnailImage(data: poster, maxPixelSize: 400, contentMode: .fit) {
+                            Image(systemName: "video").font(.largeTitle)
+                        }
                             .frame(maxHeight: 180)
                     }
                     if videoData != nil {
@@ -154,8 +176,17 @@ struct StoryPageEditorView: View {
                             Label("Choose background photo", systemImage: "photo")
                         }
                         .accessibilityIdentifier("story-background-pick-photo")
+                        PictureLibraryPickerButton(title: "Background from picture library",
+                                                   identifier: "story-background-picture-library") { picture in
+                            backgroundPhotoData = picture.imageData
+                        }
                         CameraPhotoButton(title: "Take background photo",
                                           identifier: "story-background-camera") {
+                            backgroundPhotoData = $0
+                        }
+                        PastePhotoButton(title: "Paste background image",
+                                         identifier: "story-background-paste",
+                                         onPastingChange: { pendingPhotoPastes += $0 ? 1 : -1 }) {
                             backgroundPhotoData = $0
                         }
                         if backgroundPhotoData != nil {
@@ -287,14 +318,14 @@ struct StoryPageEditorView: View {
                         dismiss()
                     }
                     .disabled(text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ||
-                              recorder.isRecording || preparingVideo || !choicesValid ||
+                              recorder.isRecording || preparingVideo || pendingPhotoPastes > 0 || !choicesValid ||
                               (backgroundStyle == .photo && backgroundPhotoData == nil))
                 }
             }
             .onChange(of: selectedPhoto) { _, photo in
                 Task {
                     if let data = try? await photo?.loadTransferable(type: Data.self) {
-                        imageData = PhotoProcessing.preparedData(from: data)
+                        imageData = await PhotoProcessing.preparedDataAsync(from: data)
                         if imageData != nil {
                             videoData = nil
                             videoPosterData = nil
@@ -307,7 +338,7 @@ struct StoryPageEditorView: View {
                 Task {
                     for photo in photos where additionalImageData.count < 3 {
                         if let data = try? await photo.loadTransferable(type: Data.self),
-                           let prepared = PhotoProcessing.preparedData(from: data) {
+                           let prepared = await PhotoProcessing.preparedDataAsync(from: data) {
                             additionalImageData.append(prepared)
                         }
                     }
@@ -317,7 +348,7 @@ struct StoryPageEditorView: View {
             .onChange(of: selectedBackgroundPhoto) { _, photo in
                 Task {
                     if let data = try? await photo?.loadTransferable(type: Data.self) {
-                        backgroundPhotoData = PhotoProcessing.preparedData(from: data)
+                        backgroundPhotoData = await PhotoProcessing.preparedDataAsync(from: data)
                     }
                 }
             }

@@ -7,10 +7,12 @@ struct WeeklyActivityEditorView: View {
     let activity: WeeklyActivity?
     let weekday: Int
     @State private var title: String
+    @State private var pastingPhoto = false
     @State private var message: String
     @State private var symbol: String
     @State private var imageData: Data?
     @State private var audioData: Data?
+    @State private var rewardChartID: UUID?
     @State private var selectedPhoto: PhotosPickerItem?
     @State private var errorMessage: String?
 
@@ -22,6 +24,7 @@ struct WeeklyActivityEditorView: View {
         _symbol = State(initialValue: activity?.option.symbol ?? "⭐️")
         _imageData = State(initialValue: activity?.option.imageData)
         _audioData = State(initialValue: activity?.option.audioData)
+        _rewardChartID = State(initialValue: activity?.rewardChartID)
     }
 
     var body: some View {
@@ -38,11 +41,16 @@ struct WeeklyActivityEditorView: View {
                     PhotosPicker(selection: $selectedPhoto, matching: .images) {
                         Label("Choose or change photo", systemImage: "photo")
                     }
+                    PictureLibraryPickerButton(title: "Picture library",
+                                               identifier: "weekly-activity-picture-library") { picture in
+                        imageData = picture.imageData
+                    }
                     CameraPhotoButton { imageData = $0 }
-                    if let imageData, let image = UIImage(data: imageData) {
-                        Image(uiImage: image)
-                            .resizable()
-                            .scaledToFit()
+                    PastePhotoButton(identifier: "weekly-activity-paste-photo", onPastingChange: { pastingPhoto = $0 }) { imageData = $0 }
+                    if let imageData {
+                        AsyncThumbnailImage(data: imageData, maxPixelSize: 400, contentMode: .fit) {
+                            Color(uiColor: .secondarySystemBackground)
+                        }
                             .frame(maxHeight: 180)
                         Button("Remove photo", role: .destructive) { self.imageData = nil }
                     }
@@ -58,6 +66,33 @@ struct WeeklyActivityEditorView: View {
                         Button("Remove recording", role: .destructive) { self.audioData = nil }
                     }
                 }
+                Section("Reward chart") {
+                    if store.rewardCharts.isEmpty {
+                        Text("Create a reward chart from Routine → Rewards to link one here.")
+                            .foregroundStyle(.secondary)
+                    } else {
+                        Menu {
+                            Button("No linked chart") { rewardChartID = nil }
+                            ForEach(store.rewardCharts) { chart in
+                                Button(chart.title) { rewardChartID = chart.id }
+                            }
+                        } label: {
+                            HStack {
+                                Text("Reward chart")
+                                Spacer()
+                                Text(store.rewardCharts.first(where: { $0.id == rewardChartID })?.title ?? "None")
+                                    .foregroundStyle(.secondary)
+                                Image(systemName: "chevron.up.chevron.down")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                        .accessibilityIdentifier("weekly-activity-reward-chart")
+                        Text("Completing this activity adds one token per date while the chart has space. Unchecking it does not remove a token or award another one on the same date.")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
+                }
             }
             .navigationTitle(activity == nil ? "New activity" : "Edit activity")
             .navigationBarTitleDisplayMode(.inline)
@@ -65,14 +100,14 @@ struct WeeklyActivityEditorView: View {
                 ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Save") { save() }
-                        .disabled(title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                        .disabled(title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || pastingPhoto)
                         .accessibilityIdentifier("save-weekly-activity")
                 }
             }
             .onChange(of: selectedPhoto) { _, photo in
                 Task {
                     if let data = try? await photo?.loadTransferable(type: Data.self) {
-                        imageData = PhotoProcessing.preparedData(from: data)
+                        imageData = await PhotoProcessing.preparedDataAsync(from: data)
                     }
                 }
             }
@@ -94,7 +129,10 @@ struct WeeklyActivityEditorView: View {
                                   imageData: imageData, audioData: audioData)
         let updated = WeeklyActivity(id: activity?.id ?? UUID(), option: option,
                                      completedOn: activity?.completedOn,
-                                     completedDates: activity?.completedDates)
+                                     completedDates: activity?.completedDates,
+                                     rewardChartID: rewardChartID,
+                                     rewardedDates: rewardChartID == activity?.rewardChartID
+                                     ? activity?.rewardedDates : nil)
         let saved = activity == nil
             ? store.addWeeklyActivity(updated, on: weekday)
             : store.updateWeeklyActivity(updated, on: weekday)

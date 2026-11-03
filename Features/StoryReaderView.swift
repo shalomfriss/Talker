@@ -1,6 +1,11 @@
 import AVFoundation
 import SwiftUI
 
+private enum StorySwitchAssignment {
+    case read
+    case advance
+}
+
 struct StoryReaderView: View {
     @EnvironmentObject private var store: CommunicationStore
     @Environment(\.scenePhase) private var scenePhase
@@ -14,8 +19,17 @@ struct StoryReaderView: View {
     @State private var slideshowTask: Task<Void, Never>?
     @State private var isSlideshowPlaying = false
     @State private var branchHistory: [UUID] = []
+    @State private var showingSwitchKeySettings = false
+    @State private var capturingSwitchAssignment: StorySwitchAssignment?
 
     private var story: VisualStory? { store.stories.first { $0.id == storyID } }
+    private var storySwitchChoices: [StorySwitchKey] {
+        var choices = StorySwitchKey.allCases
+        for key in [store.settings.storyReadKey, store.settings.storyAdvanceKey] where !choices.contains(key) {
+            choices.append(key)
+        }
+        return choices
+    }
 
     var body: some View {
         Group {
@@ -63,6 +77,14 @@ struct StoryReaderView: View {
                         .font(.subheadline.weight(.medium))
                         .padding(.horizontal, 24)
                         .accessibilityIdentifier("story-two-switch-toggle")
+                        if oneTap || twoSwitch {
+                            Button("Keyboard switch keys", systemImage: "keyboard") {
+                                showingSwitchKeySettings = true
+                            }
+                            .buttonStyle(.bordered)
+                            .padding(.horizontal, 24)
+                            .accessibilityIdentifier("story-switch-keys")
+                        }
                         HStack(spacing: 12) {
                             Button {
                                 if isSlideshowPlaying { stopSlideshow() }
@@ -125,13 +147,13 @@ struct StoryReaderView: View {
                             .frame(maxWidth: .infinity)
                         }
                         if oneTap {
-                            Text("Tap the page or use the large button to read and advance.")
+                            Text("Tap the page or use the large button to read and advance. Press \(store.settings.storyAdvanceKey.title) on a keyboard switch.")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                                 .multilineTextAlignment(.center)
                                 .padding(.horizontal, 24)
                         } else if twoSwitch {
-                            Text("Return reads this page. Space moves to the next page.")
+                            Text("\(store.settings.storyReadKey.title) reads this page. \(store.settings.storyAdvanceKey.title) moves to the next page.")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                                 .multilineTextAlignment(.center)
@@ -148,10 +170,10 @@ struct StoryReaderView: View {
                                         .frame(maxWidth: .infinity, minHeight: 64)
                                 }
                                 .buttonStyle(.borderedProminent)
-                                .keyboardShortcut(.return, modifiers: [])
+                                .keyboardShortcut(store.settings.storyReadKey.keyEquivalent, modifiers: [])
                                 .accessibilityLabel("Read current page")
                                 .accessibilityIdentifier("story-read-page")
-                                .accessibilityHint("Press Return to read this page")
+                                .accessibilityHint("Press \(store.settings.storyReadKey.title) to read this page")
                                 Button {
                                     movePage(to: safeIndex + 1)
                                 } label: {
@@ -160,10 +182,10 @@ struct StoryReaderView: View {
                                 }
                                 .buttonStyle(.bordered)
                                 .disabled(safeIndex == story.pages.count - 1)
-                                .keyboardShortcut(.space, modifiers: [])
+                                .keyboardShortcut(store.settings.storyAdvanceKey.keyEquivalent, modifiers: [])
                                 .accessibilityLabel("Next page")
                                 .accessibilityIdentifier("story-switch-next-page")
-                                .accessibilityHint("Press Space to move without reading")
+                                .accessibilityHint("Press \(store.settings.storyAdvanceKey.title) to move without reading")
                             }
                             .controlSize(.large)
                             .padding(.horizontal, 24)
@@ -188,10 +210,11 @@ struct StoryReaderView: View {
                             .buttonStyle(.borderedProminent)
                             .controlSize(.large)
                             .padding(.horizontal, oneTap ? 24 : 0)
-                            .keyboardShortcut(oneTap ? .space : .return, modifiers: [])
+                            .keyboardShortcut(oneTap ? store.settings.storyAdvanceKey.keyEquivalent : .return,
+                                              modifiers: [])
                             .accessibilityIdentifier("story-read-page")
                             .accessibilityHint(oneTap
-                                ? "Tap or press Space to read and advance"
+                                ? "Tap or press \(store.settings.storyAdvanceKey.title) to read and advance"
                                 : (page.audioData == nil ? "Read with the system voice" : "Play recorded narration"))
                         }
                         if page.audioData != nil {
@@ -261,6 +284,72 @@ struct StoryReaderView: View {
         .sheet(isPresented: $showingAddPage) { StoryPageEditorView(storyID: storyID, page: nil) }
         .sheet(item: $editingPage) { StoryPageEditorView(storyID: storyID, page: $0) }
         .sheet(item: $playingPage) { SceneHotspotVideoView(page: $0) }
+        .sheet(isPresented: $showingSwitchKeySettings) {
+            NavigationStack {
+                Group {
+                    if let assignment = capturingSwitchAssignment {
+                        StorySwitchKeyCaptureView(
+                            actionName: assignment == .read ? "Read" :
+                                (store.settings.storyOneTapReading ? "Read and advance" : "Next page")) { key in
+                            if assignment == .read { store.settings.selectStoryReadKey(key) }
+                            else { store.settings.selectStoryAdvanceKey(key) }
+                            capturingSwitchAssignment = nil
+                        } onCancel: {
+                            capturingSwitchAssignment = nil
+                        }
+                    } else {
+                        Form {
+                            if store.settings.storyTwoSwitchReading {
+                                Picker("Read key", selection: Binding(
+                                    get: { store.settings.storyReadKey },
+                                    set: { store.settings.selectStoryReadKey($0) }
+                                )) {
+                                    ForEach(storySwitchChoices) { key in
+                                        Text(key.title).tag(key)
+                                    }
+                                }
+                                .accessibilityIdentifier("story-read-key")
+                                Button("Press switch to set Read key", systemImage: "keyboard.badge.ellipsis") {
+                                    capturingSwitchAssignment = .read
+                                }
+                                .accessibilityIdentifier("story-capture-read-key")
+                            }
+                            Picker(store.settings.storyOneTapReading ? "Read and advance key" : "Next page key",
+                                   selection: Binding(
+                                    get: { store.settings.storyAdvanceKey },
+                                    set: { store.settings.selectStoryAdvanceKey($0) }
+                                   )) {
+                                ForEach(storySwitchChoices) { key in
+                                    Text(key.title).tag(key)
+                                }
+                            }
+                            .accessibilityIdentifier("story-advance-key")
+                            Button(store.settings.storyOneTapReading
+                                   ? "Press switch to set Read and advance key"
+                                   : "Press switch to set Next page key",
+                                   systemImage: "keyboard.badge.ellipsis") {
+                                capturingSwitchAssignment = .advance
+                            }
+                            .accessibilityIdentifier("story-capture-advance-key")
+                            Text("Press an unmodified key sent by a paired keyboard switch, or choose a common key above. Using the other story action's key swaps the assignments.")
+                                .font(.footnote)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                }
+                .navigationTitle(capturingSwitchAssignment == nil ? "Keyboard switch keys" : "Press a key")
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar {
+                    ToolbarItem(placement: .confirmationAction) {
+                        Button("Done") {
+                            capturingSwitchAssignment = nil
+                            showingSwitchKeySettings = false
+                        }
+                    }
+                }
+            }
+            .presentationDetents([.medium])
+        }
         .sheet(isPresented: Binding(
             get: { storyPDF != nil }, set: { if !$0 { storyPDF = nil } }
         )) {
@@ -295,7 +384,7 @@ struct StoryReaderView: View {
 
     @ViewBuilder
     private func pageContent(_ page: StoryPage) -> some View {
-        let photos = page.photos.compactMap(UIImage.init(data:))
+        let photos = page.photos
         let textPanel = page.backgroundStyle == .photo ? Color.white.opacity(0.88) : Color.clear
         VStack(spacing: 24) {
             if page.videoData != nil {
@@ -305,12 +394,11 @@ struct StoryReaderView: View {
                     playingPage = page
                 } label: {
                     Group {
-                        if let poster = page.videoPosterData,
-                           let image = UIImage(data: poster) {
-                            Image(uiImage: image)
-                                .resizable()
-                                .scaledToFit()
-                                .frame(maxHeight: 360)
+                        if let poster = page.videoPosterData {
+                            AsyncThumbnailImage(data: poster, maxPixelSize: 900, contentMode: .fit) {
+                                Text(page.symbol).font(.system(size: 100))
+                            }
+                            .frame(maxHeight: 360)
                         } else {
                             Text(page.symbol).font(.system(size: 100))
                         }
@@ -349,10 +437,10 @@ struct StoryReaderView: View {
                 .accessibilityElement(children: .ignore)
                 .accessibilityLabel("\(photos.count) photos on this page")
                 .accessibilityIdentifier("story-photo-grid")
-            } else if let image = photos.first {
-                Image(uiImage: image)
-                    .resizable()
-                    .scaledToFit()
+            } else if let data = photos.first {
+                AsyncThumbnailImage(data: data, maxPixelSize: 900, contentMode: .fit) {
+                    Text(page.symbol).font(.system(size: 100))
+                }
                     .frame(maxHeight: 360)
                     .clipShape(RoundedRectangle(cornerRadius: 18))
                     .accessibilityHidden(true)
@@ -390,11 +478,11 @@ struct StoryReaderView: View {
         }
     }
 
-    private func photoTile(_ image: UIImage, height: CGFloat) -> some View {
+    private func photoTile(_ data: Data, height: CGFloat) -> some View {
         GeometryReader { geometry in
-            Image(uiImage: image)
-                .resizable()
-                .scaledToFill()
+            AsyncThumbnailImage(data: data, maxPixelSize: 500) {
+                Color(uiColor: .secondarySystemBackground)
+            }
                 .frame(width: geometry.size.width, height: geometry.size.height)
                 .clipped()
         }
@@ -484,5 +572,85 @@ struct StoryReaderView: View {
         slideshowTask = nil
         if isSlideshowPlaying { store.stopSpeaking() }
         isSlideshowPlaying = false
+    }
+}
+
+private extension StorySwitchKey {
+    var keyEquivalent: KeyEquivalent {
+        switch rawValue {
+        case Self.space.rawValue: .space
+        case Self.returnKey.rawValue: .return
+        case Self.rightArrow.rawValue: .rightArrow
+        case Self.leftArrow.rawValue: .leftArrow
+        case Self.n.rawValue: KeyEquivalent("n")
+        case Self.r.rawValue: KeyEquivalent("r")
+        default: customCharacter.map { KeyEquivalent($0) } ?? .space
+        }
+    }
+
+    static func captured(_ key: KeyEquivalent) -> StorySwitchKey? {
+        if key == .space { return .space }
+        if key == .return { return .returnKey }
+        if key == .rightArrow { return .rightArrow }
+        if key == .leftArrow { return .leftArrow }
+        if key == KeyEquivalent("n") { return .n }
+        if key == KeyEquivalent("r") { return .r }
+        return captured(key.character)
+    }
+}
+
+private struct StorySwitchKeyCaptureView: View {
+    let actionName: String
+    let onCapture: (StorySwitchKey) -> Void
+    let onCancel: () -> Void
+    @FocusState private var hasKeyboardFocus: Bool
+    @State private var typedKey = ""
+    @State private var hasCaptured = false
+
+    var body: some View {
+        VStack(spacing: 18) {
+            Image(systemName: "keyboard")
+                .font(.largeTitle)
+                .foregroundStyle(.tint)
+            Text("Press the switch key for \(actionName)")
+                .font(.title3.bold())
+                .multilineTextAlignment(.center)
+            Text("Press one key without Command, Control, Option, or Shift. The key will be saved when received.")
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+            TextField("Waiting for a key…", text: $typedKey)
+                .font(.headline)
+                .multilineTextAlignment(.center)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+                .frame(maxWidth: .infinity, minHeight: 64)
+                .background(.quaternary, in: RoundedRectangle(cornerRadius: 12))
+                .focused($hasKeyboardFocus)
+                .onChange(of: typedKey) { _, value in
+                    guard let character = value.first else { return }
+                    if character == " " { capture(.space) }
+                    else if let key = StorySwitchKey.captured(character) { capture(key) }
+                }
+                .onKeyPress(phases: [.down]) { press in
+                    guard press.modifiers.isEmpty,
+                          let key = StorySwitchKey.captured(press.key) else { return .handled }
+                    capture(key)
+                    return .handled
+                }
+                .onSubmit { capture(.returnKey) }
+                .accessibilityIdentifier("story-key-capture-target")
+            Button("Cancel", action: onCancel)
+        }
+        .padding(24)
+        .task {
+            await Task.yield()
+            hasKeyboardFocus = true
+        }
+    }
+
+    private func capture(_ key: StorySwitchKey) {
+        guard !hasCaptured else { return }
+        hasCaptured = true
+        onCapture(key)
     }
 }

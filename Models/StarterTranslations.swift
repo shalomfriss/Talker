@@ -42,7 +42,7 @@ enum StarterTranslations {
         "hospital": "hospital", "inside": "adentro", "car": "carro",
         "now": "ahora", "later": "después", "today": "hoy",
         "tomorrow": "mañana", "morning": "la mañana", "night": "noche",
-        "wait": "espera", "soon": "pronto"
+        "wait": "espera", "soon": "pronto", "Current time": "Hora actual"
     ]
 
     static func forItems(_ items: [CommunicationItem]) -> [String: [String: WordTranslation]] {

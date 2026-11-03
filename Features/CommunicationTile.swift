@@ -1,4 +1,117 @@
+import ImageIO
 import SwiftUI
+
+@MainActor
+enum ThumbnailImageCache {
+    nonisolated static let defaultPixelSize = 240
+    struct Decoded: @unchecked Sendable {
+        let image: UIImage
+        let cost: Int
+    }
+
+    private final class Entry {
+        // Retain the source to verify cache hits if an address is reused.
+        let data: Data
+        let image: UIImage
+
+        init(data: Data, image: UIImage) {
+            self.data = data
+            self.image = image
+        }
+    }
+
+    private static let cache: NSCache<NSString, Entry> = {
+        let cache = NSCache<NSString, Entry>()
+        cache.countLimit = 250
+        cache.totalCostLimit = 32 * 1024 * 1024
+        return cache
+    }()
+
+    static func key(for data: Data, maxPixelSize: Int = defaultPixelSize) -> String {
+        data.withUnsafeBytes { bytes in
+            "\(maxPixelSize):\(bytes.count):\(String(describing: bytes.baseAddress))"
+        }
+    }
+
+    static func cachedImage(for data: Data, maxPixelSize: Int = defaultPixelSize) -> UIImage? {
+        guard let entry = cache.object(forKey: key(for: data, maxPixelSize: maxPixelSize) as NSString),
+              entry.data == data else { return nil }
+        return entry.image
+    }
+
+    static func image(for data: Data, maxPixelSize: Int = defaultPixelSize) -> UIImage? {
+        if let cached = cachedImage(for: data, maxPixelSize: maxPixelSize) { return cached }
+        guard let decoded = decode(data, maxPixelSize: maxPixelSize) else { return nil }
+        store(decoded, for: data, maxPixelSize: maxPixelSize)
+        return decoded.image
+    }
+
+    static func store(_ decoded: Decoded, for data: Data, maxPixelSize: Int = defaultPixelSize) {
+        cache.setObject(Entry(data: data, image: decoded.image),
+                        forKey: key(for: data, maxPixelSize: maxPixelSize) as NSString,
+                        cost: decoded.cost + data.count)
+    }
+
+    nonisolated static func decode(_ data: Data, maxPixelSize: Int) -> Decoded? {
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil) else { return nil }
+        let options: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceThumbnailMaxPixelSize: maxPixelSize,
+            kCGImageSourceShouldCacheImmediately: true
+        ]
+        guard let thumbnail = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else {
+            return nil
+        }
+        return Decoded(image: UIImage(cgImage: thumbnail), cost: thumbnail.bytesPerRow * thumbnail.height)
+    }
+}
+
+struct AsyncThumbnailImage<Placeholder: View>: View {
+    let data: Data
+    let maxPixelSize: Int
+    let contentMode: ContentMode
+    let placeholder: Placeholder
+    @State private var loadedKey: String?
+    @State private var image: UIImage?
+
+    init(data: Data, maxPixelSize: Int = ThumbnailImageCache.defaultPixelSize,
+         contentMode: ContentMode = .fill, @ViewBuilder placeholder: () -> Placeholder) {
+        self.data = data
+        self.maxPixelSize = maxPixelSize
+        self.contentMode = contentMode
+        self.placeholder = placeholder()
+    }
+
+    var body: some View {
+        let key = ThumbnailImageCache.key(for: data, maxPixelSize: maxPixelSize)
+        Group {
+            if loadedKey == key, let image {
+                Image(uiImage: image)
+                    .resizable()
+                    .aspectRatio(contentMode: contentMode)
+            } else {
+                placeholder
+            }
+        }
+        .task(id: key) {
+            if let cached = ThumbnailImageCache.cachedImage(for: data, maxPixelSize: maxPixelSize) {
+                image = cached
+                loadedKey = key
+                return
+            }
+            image = nil
+            loadedKey = nil
+            let decoded = await Task.detached(priority: .userInitiated) {
+                ThumbnailImageCache.decode(data, maxPixelSize: maxPixelSize)
+            }.value
+            guard !Task.isCancelled, let decoded else { return }
+            ThumbnailImageCache.store(decoded, for: data, maxPixelSize: maxPixelSize)
+            image = decoded.image
+            loadedKey = key
+        }
+    }
+}
 
 struct PointerDwellState {
     private(set) var anchor: CGPoint?
@@ -157,7 +270,9 @@ struct CommunicationTile: View {
 
     private var large: Bool { size == .large }
     private var symbolSize: CGFloat { large ? 42 : (size == .compact ? 27 : 32) }
-    private var labelSize: CGFloat { large ? 18 : (size == .compact ? 14 : 16) }
+    private var labelSize: CGFloat {
+        item.labelFontSize.map(CGFloat.init) ?? (large ? 18 : (size == .compact ? 14 : 16))
+    }
     private var imageHeight: CGFloat { large ? 78 : (size == .compact ? 42 : 52) }
     private var tileHeight: CGFloat { minimumHeight ?? size.minimumTileHeight }
     private var scanColor: Color { isScanHighlighted ? (highContrast ? .black : .orange) : .clear }
@@ -196,17 +311,19 @@ struct CommunicationTile: View {
 
     private var tileContent: some View {
         VStack(spacing: 8) {
-            if let data = item.effectiveAction == .playVideo ? item.videoPosterData : item.imageData,
-               let image = UIImage(data: data) {
-                Image(uiImage: image)
-                    .resizable()
-                    .scaledToFill()
-                    .frame(height: imageHeight)
-                    .clipped()
-                    .clipShape(RoundedRectangle(cornerRadius: 10))
+            if let data = item.effectiveAction == .playVideo ? item.videoPosterData : item.imageData {
+                AsyncThumbnailImage(data: data) {
+                    Text(item.symbol)
+                        .font(.system(size: symbolSize))
+                        .accessibilityHidden(true)
+                }
+                .frame(height: imageHeight)
+                .clipped()
+                .clipShape(RoundedRectangle(cornerRadius: 10))
             } else if item.effectiveAction == .typeText, item.label.count == 1 {
                 Text(displayLabel ?? item.label)
-                    .font(.system(size: large ? 44 : 34, weight: .bold))
+                    .font(.system(size: item.labelFontSize.map(CGFloat.init) ?? (large ? 44 : 34),
+                                  weight: .bold))
                     .accessibilityHidden(true)
             } else {
                 Text(item.symbol)
@@ -223,7 +340,7 @@ struct CommunicationTile: View {
             }
         }
         .frame(maxWidth: .infinity, minHeight: tileHeight)
-        .padding(8)
+        .padding(item.contentPadding.map(CGFloat.init) ?? 8)
         .foregroundStyle(tileForeground)
         .background(tileBackground, in: RoundedRectangle(cornerRadius: 16))
         .overlay(RoundedRectangle(cornerRadius: 16).strokeBorder(tileBorder, lineWidth: 2))

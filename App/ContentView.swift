@@ -5,6 +5,7 @@ struct ContentView: View {
     @Environment(\.scenePhase) private var scenePhase
     @StateObject private var reminderNavigation = RoutineReminderNavigation.shared
     @State private var selectedTab = 0
+    @State private var hasBeenActive = false
     @State private var isTyping = false
     @State private var remindedTemplate: RoutineTemplate?
     @State private var remindedWeeklyTarget: WeeklyReminderTarget?
@@ -15,12 +16,12 @@ struct ContentView: View {
         VStack(spacing: 0) {
             if store.settings.showUrgentBar { UrgentCommunicationBar() }
             if store.isBoardOnlyModeActive {
-                SpeakView(isTyping: $isTyping)
+                SpeakView(isTyping: $isTyping, homeBoard: store.homeBoard)
             } else {
                 VStack(spacing: 0) {
                     if selectedTab != 0 { QuickResponseBar() }
                     TabView(selection: $selectedTab) {
-                        SpeakView(isTyping: $isTyping)
+                        SpeakView(isTyping: $isTyping, homeBoard: store.homeBoard)
                             .tabItem { Label("Speak", systemImage: "quote.bubble.fill") }
                             .tag(0)
                         PhrasesView(openKeyboard: {
@@ -44,6 +45,7 @@ struct ContentView: View {
         }
         .tint(store.settings.highContrast ? .black : .indigo)
         .onAppear {
+            if scenePhase == .active { hasBeenActive = true }
             openReminderTarget()
             openWeeklyReminderTarget()
             openCalendarReminderTarget()
@@ -52,13 +54,15 @@ struct ContentView: View {
             if !active { selectedTab = 0 }
         }
         .onChange(of: scenePhase) { _, phase in
-            if phase != .active {
+            if phase == .active {
+                hasBeenActive = true
+            } else if hasBeenActive {
                 store.flushConversationDraft()
                 store.flushPersistence()
             }
         }
         .task {
-            try? await Task.sleep(for: .milliseconds(200))
+            try? await Task.sleep(for: .seconds(2))
             guard !Task.isCancelled else { return }
             await store.restoreAllReminders()
             openReminderTarget()

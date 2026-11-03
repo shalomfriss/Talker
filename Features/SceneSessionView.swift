@@ -86,6 +86,7 @@ struct SceneSessionView: View {
         NavigationStack {
             VStack(spacing: 0) {
             if store.settings.scanEnabled { scanControlBar }
+            else { QuickResponseBar() }
             ScrollViewReader { scrollProxy in
             ScrollView {
                 VStack(spacing: 16) {
@@ -457,11 +458,7 @@ struct SceneSessionView: View {
         }
         let option = hotspot.option.resolved(using: store.items)
         selectedOption = option
-        var item = option.communicationItem
-        if let spokenText = hotspot.spokenText {
-            item.message = spokenText
-            item.audioData = nil
-        }
+        let item = hotspot.communicationItem(using: store.items)
         switch hotspot.effectiveBehavior {
         case .speakAndAdd:
             store.select(item, speakFeedback: true, messageOverride: hotspot.spokenText)

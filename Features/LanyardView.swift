@@ -112,10 +112,10 @@ struct LanyardView: View {
     private func card(_ item: CommunicationItem) -> some View {
         VStack(spacing: 18) {
             Spacer(minLength: 12)
-            if let imageData = item.imageData, let image = UIImage(data: imageData) {
-                Image(uiImage: image)
-                    .resizable()
-                    .scaledToFit()
+            if let imageData = item.imageData {
+                AsyncThumbnailImage(data: imageData, maxPixelSize: 640, contentMode: .fit) {
+                    Text(item.symbol).font(.system(size: symbolSize))
+                }
                     .frame(maxWidth: 320, maxHeight: 250)
                     .clipShape(RoundedRectangle(cornerRadius: 16))
                     .accessibilityHidden(true)
@@ -152,6 +152,7 @@ struct LanyardView: View {
     private func speakSelected() {
         guard let selectedCard else { return }
         store.speakStandaloneMessage(store.displayMessage(for: selectedCard),
-                                     audioData: selectedCard.audioData)
+                                     audioData: selectedCard.audioData,
+                                     voiceIdentifier: store.boardFolderVoiceIdentifier(for: selectedCard))
     }
 }

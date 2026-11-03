@@ -7,6 +7,7 @@ struct LocalBackupsView: View {
     @State private var showingCreate = false
     @State private var newName = ""
     @State private var pendingBackup: PendingBackupImport?
+    @State private var openingBackupID: UUID?
     @State private var pendingDelete: LocalBackupSnapshot?
     @State private var exportDocument: BackupDocument?
     @State private var exportName = "open-voice-backup"
@@ -22,6 +23,7 @@ struct LocalBackupsView: View {
                 Text("Local backups stay on this device. Export a backup file to keep a copy elsewhere.")
             }
             Section("Saved backups") {
+                if openingBackupID != nil { ProgressView("Reading backup") }
                 if backups.isEmpty {
                     Text("No local backups for this profile yet.")
                         .foregroundStyle(.secondary)
@@ -40,6 +42,7 @@ struct LocalBackupsView: View {
                             .frame(maxWidth: .infinity, alignment: .leading)
                         }
                         .buttonStyle(.plain)
+                        .disabled(openingBackupID != nil)
                         .accessibilityIdentifier("open-local-backup-\(snapshot.id.uuidString)")
                         Menu {
                             Button("Export JSON file", systemImage: "square.and.arrow.up") { export(snapshot) }
@@ -105,11 +108,18 @@ struct LocalBackupsView: View {
     }
 
     private func open(_ snapshot: LocalBackupSnapshot) {
-        do {
-            let data = try store.localBackupData(id: snapshot.id)
-            let preview = try JSONDecoder().decode(StoredData.self, from: data)
-            pendingBackup = PendingBackupImport(data: data, preview: preview)
-        } catch { errorMessage = error.localizedDescription }
+        guard openingBackupID == nil else { return }
+        openingBackupID = snapshot.id
+        let profileID = store.activeProfileID
+        Task {
+            defer { openingBackupID = nil }
+            do {
+                let data = try await store.localBackupDataAsync(id: snapshot.id)
+                let prepared = try await PendingBackupImport.prepare(data: data)
+                guard store.activeProfileID == profileID else { return }
+                pendingBackup = prepared
+            } catch { errorMessage = error.localizedDescription }
+        }
     }
 
     private func export(_ snapshot: LocalBackupSnapshot) {

@@ -12,6 +12,7 @@ struct BoardManagerView: View {
     @State private var newFolderName = ""
     @State private var renamingFolder: String?
     @State private var renamedFolderName = ""
+    @State private var editingFolderVoice: BoardFolderVoiceTarget?
     @State private var errorMessage: String?
     @State private var showingImporter = false
     @State private var showingExporter = false
@@ -130,6 +131,10 @@ struct BoardManagerView: View {
                 BoardAppearanceView(boardName: target.name)
                     .environmentObject(store)
             }
+            .sheet(item: $editingFolderVoice) { target in
+                BoardFolderVoiceView(folder: target.name)
+                    .environmentObject(store)
+            }
             .sheet(isPresented: $showingBulkAdd) {
                 BulkVocabularyView(initialBoard: store.categories.first ?? "Core")
                     .environmentObject(store)
@@ -235,6 +240,10 @@ struct BoardManagerView: View {
                             renamingFolder = folder
                             renamedFolderName = folder
                         }
+                        Button("Folder voice", systemImage: "waveform") {
+                            editingFolderVoice = BoardFolderVoiceTarget(name: folder)
+                        }
+                        .accessibilityIdentifier("board-folder-voice-\(folder)")
                         Button("Remove folder", systemImage: "folder.badge.minus", role: .destructive) {
                             _ = store.deleteBoardFolder(folder)
                         }
@@ -477,6 +486,82 @@ private struct BoardAppearanceTarget: Identifiable {
 private struct BoardQRTarget: Identifiable {
     let name: String
     var id: String { name }
+}
+
+private struct BoardFolderVoiceTarget: Identifiable {
+    let name: String
+    var id: String { name }
+}
+
+private struct BoardFolderVoiceView: View {
+    @EnvironmentObject private var store: CommunicationStore
+    @Environment(\.dismiss) private var dismiss
+    @ObservedObject private var voiceCatalog = SpeechVoiceCatalog.shared
+    let folder: String
+    @State private var searchText = ""
+
+    private var voices: [SpeechVoiceOption] {
+        voiceCatalog.voices
+            .filter { $0.language.hasPrefix(store.settings.communicationLanguage) }
+            .filter { searchText.isEmpty || $0.name.localizedStandardContains(searchText) }
+            .sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+    }
+
+    var body: some View {
+        NavigationStack {
+            List {
+                Section {
+                    Button {
+                        _ = store.setBoardFolderVoiceIdentifier(nil, for: folder)
+                        dismiss()
+                    } label: {
+                        Label("Use profile voice", systemImage: currentIdentifier.isEmpty
+                              ? "checkmark.circle.fill" : "circle")
+                    }
+                    .accessibilityIdentifier("folder-voice-profile")
+                } footer: {
+                    Text("Buttons in this folder use its voice when spoken or when their picture message is read aloud. Recordings on individual buttons still play as recorded.")
+                }
+                Section("Installed voices") {
+                    if voices.isEmpty {
+                        Text("Installed voices for the current communication language appear here when iOS finishes loading them.")
+                            .foregroundStyle(.secondary)
+                    }
+                    ForEach(voices) { voice in
+                        Button {
+                            _ = store.setBoardFolderVoiceIdentifier(voice.identifier, for: folder)
+                            dismiss()
+                        } label: {
+                            HStack {
+                                Text(voice.name)
+                                if voice.isPersonalVoice { Text("Personal").font(.caption).foregroundStyle(.secondary) }
+                                Spacer()
+                                if voice.identifier == currentIdentifier { Image(systemName: "checkmark") }
+                            }
+                        }
+                        .accessibilityIdentifier("folder-voice-\(voice.identifier)")
+                    }
+                }
+                if !currentIdentifier.isEmpty,
+                   !voiceCatalog.voices.contains(where: { $0.identifier == currentIdentifier &&
+                       $0.language.hasPrefix(store.settings.communicationLanguage) }) {
+                    Section {
+                        Text("The saved voice is unavailable for the current language. This folder uses the profile voice until that voice is available again or you choose another.")
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+            .navigationTitle("Voice for \(folder)")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Done") { dismiss() } } }
+            .searchable(text: $searchText, prompt: "Find a voice")
+            .onAppear { voiceCatalog.refresh() }
+        }
+    }
+
+    private var currentIdentifier: String {
+        store.settings.boardFolderVoiceIdentifiers[folder] ?? ""
+    }
 }
 
 private struct BoardGridEditorView: View {

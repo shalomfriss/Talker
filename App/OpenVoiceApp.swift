@@ -11,6 +11,44 @@ struct OpenVoiceApp: App {
     init() {
         let initial = CommunicationStore()
 #if DEBUG
+        if ProcessInfo.processInfo.arguments.contains(where: { $0.hasPrefix("-ui-test-") }) {
+        let communicationUseProfileName = "Communication use UI test"
+        if ProcessInfo.processInfo.arguments.contains("-ui-test-communication-use") ||
+           ProcessInfo.processInfo.arguments.contains("-ui-test-communication-use-cleanup") {
+            for profile in initial.profiles where profile.name == communicationUseProfileName {
+                _ = initial.deleteProfile(id: profile.id)
+            }
+            if ProcessInfo.processInfo.arguments.contains("-ui-test-communication-use") {
+                _ = initial.addProfile(communicationUseProfileName)
+                initial.clearCommunicationUse()
+                initial.settings.recordCommunicationUse = false
+            }
+        }
+        let lifeNotebookProfileName = "Life notebook UI test"
+        if ProcessInfo.processInfo.arguments.contains("-ui-test-life-notebook") ||
+           ProcessInfo.processInfo.arguments.contains("-ui-test-life-notebook-cleanup") {
+            for profile in initial.profiles where profile.name == lifeNotebookProfileName {
+                _ = initial.deleteProfile(id: profile.id)
+            }
+            if ProcessInfo.processInfo.arguments.contains("-ui-test-life-notebook") {
+                _ = initial.addProfile(lifeNotebookProfileName)
+            }
+        }
+        let lifeNotebookVideoProfileName = "Life notebook video UI test"
+        if ProcessInfo.processInfo.arguments.contains("-ui-test-life-notebook-video") ||
+           ProcessInfo.processInfo.arguments.contains("-ui-test-life-notebook-video-cleanup") {
+            for profile in initial.profiles where profile.name == lifeNotebookVideoProfileName {
+                _ = initial.deleteProfile(id: profile.id)
+            }
+            if ProcessInfo.processInfo.arguments.contains("-ui-test-life-notebook-video"),
+               let url = Bundle.main.url(forResource: "SceneSample", withExtension: "mov"),
+               let video = try? Data(contentsOf: url) {
+                _ = initial.addProfile(lifeNotebookVideoProfileName)
+                let post = LifeNotebookPost(title: "Playground video", text: "Watch me play.",
+                    photoData: Self.literacyTestScene.imageData, videoData: video)
+                Task { @MainActor in try? await initial.saveLifeNotebookPost(post) }
+            }
+        }
         let largeBoardFixture = ProcessInfo.processInfo.arguments.contains("-ui-test-large-board-startup") ||
             ProcessInfo.processInfo.arguments.contains("-ui-test-large-board-scan")
         let largeBoardProfileName = "Large board UI test"
@@ -37,22 +75,90 @@ struct OpenVoiceApp: App {
                 _ = initial.deleteProfile(id: profile.id)
             }
         }
+        let boardHintsProfileName = "Board hints UI test"
+        if ProcessInfo.processInfo.arguments.contains("-ui-test-board-hints") ||
+           ProcessInfo.processInfo.arguments.contains("-ui-test-board-hints-cleanup") {
+            for profile in initial.profiles where profile.name == boardHintsProfileName {
+                _ = initial.deleteProfile(id: profile.id)
+            }
+            if ProcessInfo.processInfo.arguments.contains("-ui-test-board-hints") {
+                _ = initial.addProfile(boardHintsProfileName)
+                initial.settings.showBoardSuggestions = false
+                initial.settings.saveHistory = false
+                initial.settings.learnPrediction = false
+                initial.clearMessage()
+            }
+        }
+        let languageSampleProfileName = "Language sample UI test"
+        if ProcessInfo.processInfo.arguments.contains("-ui-test-language-sample") ||
+           ProcessInfo.processInfo.arguments.contains("-ui-test-language-sample-cleanup") {
+            for profile in initial.profiles where profile.name == languageSampleProfileName {
+                _ = initial.deleteProfile(id: profile.id)
+            }
+            if ProcessInfo.processInfo.arguments.contains("-ui-test-language-sample") {
+                _ = initial.addProfile(languageSampleProfileName)
+                initial.settings.saveHistory = true
+                initial.clearHistory()
+                _ = initial.addPartnerTurn("Would you like more time?")
+            }
+        }
+        let tileAppearanceProfileName = "Tile appearance UI test"
+        if ProcessInfo.processInfo.arguments.contains("-ui-test-tile-appearance") ||
+           ProcessInfo.processInfo.arguments.contains("-ui-test-tile-appearance-cleanup") {
+            for profile in initial.profiles where profile.name == tileAppearanceProfileName {
+                _ = initial.deleteProfile(id: profile.id)
+            }
+            if ProcessInfo.processInfo.arguments.contains("-ui-test-tile-appearance") {
+                _ = initial.addProfile(tileAppearanceProfileName)
+            }
+        }
         if ProcessInfo.processInfo.arguments.contains("-ui-test-reward-chart") {
             for chart in initial.rewardCharts { _ = initial.deleteRewardChart(id: chart.id) }
             for record in initial.rewardCollectibles { _ = initial.deleteRewardCollectible(id: record.id) }
         }
-        if ProcessInfo.processInfo.arguments.contains("-ui-test-routine-reward") {
+        if ProcessInfo.processInfo.arguments.contains("-ui-test-weekly-reward") {
+            let profileName = "Weekly reward UI test"
+            if let profile = initial.profiles.first(where: { $0.name == profileName }) {
+                _ = initial.switchProfile(to: profile.id)
+            } else {
+                _ = initial.addProfile(profileName)
+            }
+            for day in initial.weeklyPlan.days {
+                for activity in day.activities {
+                    initial.deleteWeeklyActivity(id: activity.id, on: day.weekday)
+                }
+            }
+            for chart in initial.rewardCharts { _ = initial.deleteRewardChart(id: chart.id) }
+            _ = initial.addRewardChart(title: "Weekly stars test", reward: "Choose music", targetTokens: 2)
+        }
+        if ProcessInfo.processInfo.arguments.contains("-ui-test-calendar-reward") {
+            let profileName = "Calendar reward UI test"
+            if let profile = initial.profiles.first(where: { $0.name == profileName }) {
+                _ = initial.switchProfile(to: profile.id)
+            } else {
+                _ = initial.addProfile(profileName)
+            }
+            for event in initial.visualCalendar.events { initial.deleteCalendarEvent(id: event.id) }
+            for chart in initial.rewardCharts { _ = initial.deleteRewardChart(id: chart.id) }
+            _ = initial.addRewardChart(title: "Calendar stars test", reward: "Choose music", targetTokens: 2)
+        }
+        if ProcessInfo.processInfo.arguments.contains("-ui-test-routine-reward") ||
+           ProcessInfo.processInfo.arguments.contains("-ui-test-routine-step-reward") {
             for chart in initial.rewardCharts { _ = initial.deleteRewardChart(id: chart.id) }
             for template in initial.routineTemplates where template.name == "Reward routine test" {
                 initial.deleteRoutineTemplate(id: template.id)
             }
             for step in initial.routines { initial.deleteRoutineStep(step) }
             initial.addRoutineStep("Finish a step", symbol: "✅")
+            if ProcessInfo.processInfo.arguments.contains("-ui-test-routine-step-reward") {
+                initial.addRoutineStep("Finish another step", symbol: "⭐")
+            }
             _ = initial.saveRoutineTemplate(name: "Reward routine test")
             _ = initial.addRewardChart(title: "Routine stars", reward: "Choose music", targetTokens: 2)
         }
         if ProcessInfo.processInfo.arguments.contains("-ui-test-routine-choice") {
             initial.settings.choiceBoardEditingLocked = false
+            initial.settings.scanEnabled = false
             for step in initial.routines { initial.deleteRoutineStep(step) }
             for template in initial.routineTemplates where template.name == "Choice routine test" {
                 initial.deleteRoutineTemplate(id: template.id)
@@ -259,6 +365,9 @@ struct OpenVoiceApp: App {
         }
         if ProcessInfo.processInfo.arguments.contains("-ui-test-story-one-tap") {
             initial.settings.storyOneTapReading = false
+            initial.settings.storyTwoSwitchReading = false
+            initial.settings.storyReadKey = .returnKey
+            initial.settings.storyAdvanceKey = .space
             for story in initial.stories where story.title == "One tap story test" {
                 initial.deleteStory(id: story.id)
             }
@@ -312,6 +421,29 @@ struct OpenVoiceApp: App {
                     SceneHotspot(option: ChoiceOption(label: "write"), x: 0.7, y: 0.65,
                                  showsLabel: false, behavior: .addOnly, spokenText: "Please write")
                 ]))
+        }
+        if ProcessInfo.processInfo.arguments.contains("-ui-test-photo-board") ||
+           ProcessInfo.processInfo.arguments.contains("-ui-test-photo-board-cleanup") {
+            for scene in initial.sceneBoards where scene.title == "Photo words test scene" {
+                initial.deleteSceneBoard(id: scene.id)
+            }
+            if ProcessInfo.processInfo.arguments.contains("-ui-test-photo-board") {
+                let image = UIGraphicsImageRenderer(size: CGSize(width: 800, height: 600)).image { context in
+                    UIColor.white.setFill()
+                    context.fill(CGRect(x: 0, y: 0, width: 800, height: 600))
+                    let attributes: [NSAttributedString.Key: Any] = [
+                        .font: UIFont.systemFont(ofSize: 72, weight: .bold),
+                        .foregroundColor: UIColor.black
+                    ]
+                    NSString(string: "HELP").draw(at: CGPoint(x: 80, y: 100), withAttributes: attributes)
+                    NSString(string: "WATER").draw(at: CGPoint(x: 430, y: 400), withAttributes: attributes)
+                }
+                if let data = PhotoProcessing.preparedData(from: image) {
+                    initial.saveSceneBoard(VisualSceneBoard(title: "Photo words test scene",
+                        imageData: data,
+                        hotspots: [SceneHotspot(option: ChoiceOption(label: "Start"), x: 0.5, y: 0.5)]))
+                }
+            }
         }
         if ProcessInfo.processInfo.arguments.contains("-ui-test-video-scene"),
            let url = Bundle.main.url(forResource: "SceneSample", withExtension: "mov"),
@@ -477,6 +609,7 @@ struct OpenVoiceApp: App {
             }
             initial.lockCalendarEditing()
         }
+        }
 #endif
         _store = StateObject(wrappedValue: initial)
         _nearbyChat = StateObject(wrappedValue: NearbyChatService(store: initial))
@@ -489,6 +622,11 @@ struct OpenVoiceApp: App {
                 .environmentObject(nearbyChat)
                 .environmentObject(callAudio)
                 .onChange(of: store.activeProfileID) { _, _ in nearbyChat.stop() }
+                .task {
+                    try? await Task.sleep(for: .seconds(1))
+                    guard !Task.isCancelled else { return }
+                    callAudio.refresh()
+                }
         }
     }
 

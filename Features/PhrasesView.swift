@@ -14,6 +14,7 @@ private enum PhraseFileImportKind {
 
 struct PhrasesView: View {
     @EnvironmentObject private var store: CommunicationStore
+    @ObservedObject private var voiceCatalog = SpeechVoiceCatalog.shared
     let openKeyboard: () -> Void
     @State private var newPhrase = ""
     @State private var newLabel = ""
@@ -266,7 +267,7 @@ struct PhrasesView: View {
                         .autocorrectionDisabled()
                     Picker("Spoken language", selection: $newLanguageCode) {
                         Text("Use current voice").tag(String?.none)
-                        ForEach(PhraseLanguage.availableCodes, id: \.self) { code in
+                        ForEach(PhraseLanguage.codes(from: voiceCatalog.voices), id: \.self) { code in
                             Text(PhraseLanguage.title(for: code))
                                 .tag(Optional(code))
                                 .accessibilityIdentifier("new-phrase-language-\(code)")
@@ -485,6 +486,7 @@ struct PhrasesView: View {
                 showingAudioShareError = false
             }
         }
+        .onAppear { voiceCatalog.refresh() }
     }
 
     private func phraseRow(_ phrase: SavedPhrase, recent: Bool = false) -> some View {
@@ -500,10 +502,11 @@ struct PhrasesView: View {
                 else if store.appendTypedPhrase(phrase) { openKeyboard() }
             } label: {
                 HStack(spacing: 10) {
-                    if let data = phrase.imageData, let picture = UIImage(data: data) {
-                        Image(uiImage: picture)
-                            .resizable()
-                            .scaledToFill()
+                    if let data = phrase.imageData {
+                        AsyncThumbnailImage(data: data) {
+                            Image(systemName: phrase.folderLink != nil ? "folder.fill" : isTemplate ? "text.badge.plus" :
+                                  (phrase.audioData == nil ? "speaker.wave.2.fill" : "waveform"))
+                        }
                             .frame(width: 50, height: 50)
                             .clipShape(RoundedRectangle(cornerRadius: 8))
                     } else {

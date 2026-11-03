@@ -139,7 +139,7 @@ final class OpenBoardFormatTests: XCTestCase {
 
     func testActionButtonsRoundTripThroughOpenBoardFormat() throws {
         let actions: [(String, ButtonAction)] = [
-            ("Wait", .speakImmediately), ("Say", .speakMessage),
+            ("Wait", .speakImmediately), ("Clock", .speakCurrentTime), ("Say", .speakMessage),
             ("Clear", .clearMessage), ("Stop", .stopSpeaking),
             ("Restore", .undoClearMessage), ("Delete", .deleteLastEntry),
             ("Back", .backBoard), ("Home", .homeBoard)
@@ -155,6 +155,8 @@ final class OpenBoardFormatTests: XCTestCase {
         XCTAssertEqual(buttons.first { $0["label"] as? String == "Clear" }?["action"] as? String, ":clear")
         XCTAssertEqual(buttons.first { $0["label"] as? String == "Wait" }?["ext_openvoice_action"] as? String,
                        ButtonAction.speakImmediately.rawValue)
+        XCTAssertEqual(buttons.first { $0["label"] as? String == "Clock" }?["ext_openvoice_action"] as? String,
+                       ButtonAction.speakCurrentTime.rawValue)
 
         let imported = try OpenBoardFormat.importData(data, fileExtension: "obf")
         XCTAssertEqual(imported.skippedActions, 0)

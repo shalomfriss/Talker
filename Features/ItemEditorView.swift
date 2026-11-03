@@ -1,5 +1,6 @@
 import PhotosUI
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct ItemEditorView: View {
     @EnvironmentObject private var store: CommunicationStore
@@ -15,6 +16,10 @@ struct ItemEditorView: View {
     @State private var destinationBoard: String
     @State private var destinationSceneID: UUID?
     @State private var imageData: Data?
+    @State private var showingPictureLibrary = false
+    @State private var pictureLibraryError: String?
+    @State private var photoSavedToLibrary = false
+    @State private var pastingPhoto = false
     @State private var arasaacPictogramID: Int?
     @State private var showingPictogramSearch = false
     @State private var audioData: Data?
@@ -28,6 +33,10 @@ struct ItemEditorView: View {
     @State private var hasCustomBorder: Bool
     @State private var backgroundColor: Color
     @State private var borderColor: Color
+    @State private var hasCustomLabelFontSize: Bool
+    @State private var labelFontSize: Int
+    @State private var hasCustomContentPadding: Bool
+    @State private var contentPadding: Int
     @State private var selectedPhoto: PhotosPickerItem?
     @State private var selectedVideo: PhotosPickerItem?
     @State private var showingVideoImporter = false
@@ -69,6 +78,10 @@ struct ItemEditorView: View {
         _borderColor = State(initialValue: item?.borderColorHex
             .flatMap { ButtonColorValue(text: $0) }.map(ButtonColorAppearance.color)
             ?? Color(red: 0.63, green: 0.34, blue: 0.05))
+        _hasCustomLabelFontSize = State(initialValue: item?.labelFontSize != nil)
+        _labelFontSize = State(initialValue: CommunicationItem.normalizedLabelFontSize(item?.labelFontSize) ?? 16)
+        _hasCustomContentPadding = State(initialValue: item?.contentPadding != nil)
+        _contentPadding = State(initialValue: CommunicationItem.normalizedContentPadding(item?.contentPadding) ?? 8)
     }
 
     var body: some View {
@@ -144,11 +157,32 @@ struct ItemEditorView: View {
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                 }
+                Section("Button text and spacing") {
+                    Toggle("Custom label size", isOn: $hasCustomLabelFontSize)
+                        .accessibilityIdentifier("button-custom-label-size")
+                    if hasCustomLabelFontSize {
+                        Stepper("Label size: \(labelFontSize) pt", value: $labelFontSize, in: 12...30)
+                            .accessibilityIdentifier("button-label-size")
+                    }
+                    Toggle("Custom inner spacing", isOn: $hasCustomContentPadding)
+                        .accessibilityIdentifier("button-custom-padding")
+                    if hasCustomContentPadding {
+                        Stepper("Inner spacing: \(contentPadding) pt", value: $contentPadding, in: 0...16)
+                            .accessibilityIdentifier("button-content-padding")
+                    }
+                    Text("These choices affect only this button. Automatic uses the board's button size.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
                 Section("Picture") {
                     TextField("Emoji or symbol", text: $symbol)
                     PhotosPicker(selection: $selectedPhoto, matching: .images) {
                         Label("Choose a photo", systemImage: "photo")
                     }
+                    Button("Choose from picture library", systemImage: "photo.stack") {
+                        showingPictureLibrary = true
+                    }
+                    .accessibilityIdentifier("button-picture-library")
                     Button("Search ARASAAC pictograms", systemImage: "magnifyingglass") {
                         showingPictogramSearch = true
                     }
@@ -156,11 +190,17 @@ struct ItemEditorView: View {
                     CameraPhotoButton {
                         imageData = $0
                         arasaacPictogramID = nil
+                        photoSavedToLibrary = false
                     }
-                    if let imageData, let image = UIImage(data: imageData) {
-                        Image(uiImage: image)
-                            .resizable()
-                            .scaledToFit()
+                    PastePhotoButton(identifier: "button-paste-photo", onPastingChange: { pastingPhoto = $0 }) {
+                        imageData = $0
+                        arasaacPictogramID = nil
+                        photoSavedToLibrary = false
+                    }
+                    if let imageData {
+                        AsyncThumbnailImage(data: imageData, maxPixelSize: 400, contentMode: .fit) {
+                            Image(systemName: "photo").font(.largeTitle)
+                        }
                             .frame(maxHeight: 180)
                         Button("Remove photo", role: .destructive) {
                             self.imageData = nil
@@ -169,6 +209,22 @@ struct ItemEditorView: View {
                         if arasaacPictogramID != nil {
                             Text(ARASAACPictogramService.attribution)
                                 .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        }
+                        Button("Save photo to picture library", systemImage: "square.and.arrow.down") {
+                            Task {
+                                do {
+                                    _ = try await store.addPersonalPicture(imageData,
+                                        title: label.isEmpty ? "Picture" : label)
+                                    photoSavedToLibrary = true
+                                } catch { pictureLibraryError = error.localizedDescription }
+                            }
+                        }
+                        .accessibilityIdentifier("button-save-picture-to-library")
+                        .disabled(photoSavedToLibrary)
+                        if photoSavedToLibrary {
+                            Text("Saved in this profile’s picture library")
+                                .font(.footnote)
                                 .foregroundStyle(.secondary)
                         }
                     }
@@ -185,10 +241,10 @@ struct ItemEditorView: View {
                         }
                         .disabled(preparingVideo)
                         if preparingVideo { ProgressView("Preparing video") }
-                        if let data = videoPosterData, let image = UIImage(data: data) {
-                            Image(uiImage: image)
-                                .resizable()
-                                .scaledToFit()
+                        if let data = videoPosterData {
+                            AsyncThumbnailImage(data: data, maxPixelSize: 400, contentMode: .fit) {
+                                Image(systemName: "video").font(.largeTitle)
+                            }
                                 .frame(maxHeight: 180)
                         }
                         if videoData != nil {
@@ -276,14 +332,15 @@ struct ItemEditorView: View {
                 ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Save") { saveItem() }
-                        .disabled(!canSave)
+                        .disabled(!canSave || pastingPhoto)
                 }
             }
             .onChange(of: selectedPhoto) { _, photo in
                 Task {
                     if let data = try? await photo?.loadTransferable(type: Data.self) {
-                        imageData = PhotoProcessing.preparedData(from: data)
+                        imageData = await PhotoProcessing.preparedDataAsync(from: data)
                         arasaacPictogramID = nil
+                        photoSavedToLibrary = false
                     }
                 }
             }
@@ -292,7 +349,22 @@ struct ItemEditorView: View {
                     data, id in
                     imageData = data
                     arasaacPictogramID = id
+                    photoSavedToLibrary = false
                 }
+            }
+            .sheet(isPresented: $showingPictureLibrary) {
+                PersonalPictureLibraryView { picture in
+                    imageData = picture.imageData
+                    arasaacPictogramID = nil
+                    photoSavedToLibrary = false
+                }
+            }
+            .alert("Picture library", isPresented: Binding(
+                get: { pictureLibraryError != nil }, set: { if !$0 { pictureLibraryError = nil } }
+            )) {
+                Button("OK") { pictureLibraryError = nil }
+            } message: {
+                Text(pictureLibraryError ?? "")
             }
             .onChange(of: selectedVideo) { _, video in
                 guard let video else { return }
@@ -386,6 +458,8 @@ struct ItemEditorView: View {
             item.borderColorHex = hasCustomBorder
                 ? ButtonColorAppearance.hex(from: borderColor) : nil
             item.grammarCategory = grammarCategory
+            item.labelFontSize = hasCustomLabelFontSize ? labelFontSize : nil
+            item.contentPadding = hasCustomContentPadding ? contentPadding : nil
             store.updateItem(item)
             store.updateSpanishTranslation(for: item.id, label: spanishLabel, message: spanishMessage)
         } else {
@@ -407,7 +481,9 @@ struct ItemEditorView: View {
                               ? ButtonColorAppearance.hex(from: backgroundColor) : nil,
                           borderColorHex: hasCustomBorder
                               ? ButtonColorAppearance.hex(from: borderColor) : nil,
-                          grammarCategory: grammarCategory)
+                          grammarCategory: grammarCategory,
+                          labelFontSize: hasCustomLabelFontSize ? labelFontSize : nil,
+                          contentPadding: hasCustomContentPadding ? contentPadding : nil)
         }
         dismiss()
     }
@@ -469,6 +545,10 @@ struct ItemEditorView: View {
             Text("Speak this button’s message without adding it to the picture message.")
                 .font(.footnote)
                 .foregroundStyle(.secondary)
+        } else if buttonAction == .speakCurrentTime {
+            Text("Speak the current time in the board language without changing either message draft. The time is read when the button is tapped.")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
         } else if buttonAction == .speakMessage {
             Text("Speak the whole picture message that is already on screen.")
                 .font(.footnote)
@@ -527,5 +607,317 @@ struct ItemEditorView: View {
             videoError = error.localizedDescription
         }
         preparingVideo = false
+    }
+}
+
+struct PersonalPictureLibraryView: View {
+    @EnvironmentObject private var store: CommunicationStore
+    @Environment(\.dismiss) private var dismiss
+    let onSelect: (PersonalPicture) -> Void
+    @State private var searchText = ""
+    @State private var selectedPhoto: PhotosPickerItem?
+    @State private var showingFiles = false
+    @State private var showingTextCreator = false
+    @State private var showingStarterGallery = false
+    @State private var textPictureContent = ""
+    @State private var isLoading = true
+    @State private var isAddingPicture = false
+    @State private var errorMessage: String?
+    @State private var pictureToRename: PersonalPicture?
+    @State private var renameDraft = ""
+    @State private var pictureToDelete: PersonalPicture?
+
+    private var visiblePictures: [PersonalPicture] {
+        guard !searchText.isEmpty else { return store.pictureLibrary }
+        return store.pictureLibrary.filter { $0.title.localizedStandardContains(searchText) }
+    }
+
+    var body: some View {
+        NavigationStack {
+            VStack(alignment: .leading, spacing: 12) {
+                ScrollView(.horizontal) {
+                    HStack(spacing: 10) {
+                        PhotosPicker(selection: $selectedPhoto, matching: .images) {
+                            Label("Photos", systemImage: "photo")
+                        }
+                        CameraPhotoButton(title: "Camera", identifier: "picture-library-camera") { data in
+                            Task { await addPicture(data, title: "Camera photo") }
+                        }
+                        PastePhotoButton(title: "Paste", identifier: "picture-library-paste") { data in
+                            Task { await addPicture(data, title: "Pasted picture") }
+                        }
+                        Button("Files", systemImage: "folder") { showingFiles = true }
+                            .accessibilityIdentifier("picture-library-files")
+                        Button("Text or emoji", systemImage: "textformat") {
+                            textPictureContent = ""
+                            showingTextCreator = true
+                        }
+                        .accessibilityIdentifier("picture-library-create-text")
+                        Button("Starter gallery", systemImage: "square.grid.2x2") {
+                            showingStarterGallery = true
+                        }
+                        .accessibilityIdentifier("picture-library-starter-gallery")
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(isAddingPicture)
+                }
+                .scrollIndicators(.hidden)
+                .padding(.horizontal)
+
+                if isLoading || isAddingPicture { ProgressView(isLoading ? "Loading pictures" : "Saving picture") }
+                if let errorMessage {
+                    Text(errorMessage).foregroundStyle(.red).font(.footnote)
+                        .accessibilityIdentifier("picture-library-error")
+                }
+                if !isLoading && store.pictureLibrary.isEmpty {
+                    ContentUnavailableView("No saved pictures", systemImage: "photo.stack",
+                                           description: Text("Add a picture above, then choose it for this item."))
+                } else {
+                    ScrollView {
+                        LazyVGrid(columns: [GridItem(.adaptive(minimum: 112), spacing: 12)], spacing: 12) {
+                            ForEach(visiblePictures) { picture in pictureCell(picture) }
+                        }
+                        .padding()
+                    }
+                }
+            }
+            .navigationTitle("Picture library")
+            .toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Done") { dismiss() } } }
+            .searchable(text: $searchText, prompt: "Find a picture")
+            .task {
+                do { try await store.loadPersonalPictures() }
+                catch { errorMessage = error.localizedDescription }
+                isLoading = false
+            }
+            .onChange(of: selectedPhoto) { _, photo in
+                guard let photo else { return }
+                Task {
+                    do {
+                        guard let data = try await photo.loadTransferable(type: Data.self) else {
+                            throw PictureLibraryError.invalidPicture
+                        }
+                        await addPicture(data, title: "Photo")
+                    } catch { errorMessage = error.localizedDescription }
+                    selectedPhoto = nil
+                }
+            }
+            .fileImporter(isPresented: $showingFiles, allowedContentTypes: [.image]) { result in
+                Task {
+                    do {
+                        let url = try result.get()
+                        let access = url.startAccessingSecurityScopedResource()
+                        defer { if access { url.stopAccessingSecurityScopedResource() } }
+                        let data = try await Task.detached(priority: .userInitiated) {
+                            try Data(contentsOf: url)
+                        }.value
+                        await addPicture(data, title: url.deletingPathExtension().lastPathComponent)
+                    } catch { errorMessage = error.localizedDescription }
+                }
+            }
+            .sheet(isPresented: $showingTextCreator) {
+                NavigationStack {
+                    Form {
+                        TextField("Words or emoji", text: $textPictureContent, axis: .vertical)
+                            .accessibilityIdentifier("picture-library-text-content")
+                        Text("The words or emoji become a picture you can reuse on buttons.")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                        if let errorMessage { Text(errorMessage).foregroundStyle(.red) }
+                    }
+                    .navigationTitle("Create picture")
+                    .toolbar {
+                        ToolbarItem(placement: .cancellationAction) {
+                            Button("Cancel") { showingTextCreator = false }
+                        }
+                        ToolbarItem(placement: .confirmationAction) {
+                            Button("Create") {
+                                guard let data = PhotoProcessing.textPictureData(textPictureContent) else {
+                                    errorMessage = PictureLibraryError.invalidPicture.localizedDescription
+                                    return
+                                }
+                                Task {
+                                    if await addPicture(data, title: textPictureContent) {
+                                        showingTextCreator = false
+                                    }
+                                }
+                            }
+                            .disabled(textPictureContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                        }
+                    }
+                }
+            }
+            .sheet(isPresented: $showingStarterGallery) {
+                StarterPictureGalleryView { searchText = "" }
+            }
+            .alert("Rename picture", isPresented: Binding(
+                get: { pictureToRename != nil }, set: { if !$0 { pictureToRename = nil } }
+            )) {
+                TextField("Picture name", text: $renameDraft)
+                Button("Save") {
+                    guard let picture = pictureToRename else { return }
+                    Task {
+                        do { try await store.renamePersonalPicture(picture.id, title: renameDraft) }
+                        catch { errorMessage = error.localizedDescription }
+                    }
+                    pictureToRename = nil
+                }
+                Button("Cancel", role: .cancel) { pictureToRename = nil }
+            }
+            .confirmationDialog("Delete picture from library?", isPresented: Binding(
+                get: { pictureToDelete != nil }, set: { if !$0 { pictureToDelete = nil } }
+            )) {
+                Button("Delete picture", role: .destructive) {
+                    guard let picture = pictureToDelete else { return }
+                    Task {
+                        do { try await store.deletePersonalPicture(picture.id) }
+                        catch { errorMessage = error.localizedDescription }
+                    }
+                    pictureToDelete = nil
+                }
+            } message: {
+                Text("Buttons already using this picture keep their own copy.")
+            }
+        }
+    }
+
+    private func pictureCell(_ picture: PersonalPicture) -> some View {
+        Button {
+            onSelect(picture)
+            dismiss()
+        } label: {
+            VStack(spacing: 6) {
+                AsyncThumbnailImage(data: picture.imageData) {
+                    Image(systemName: "photo")
+                        .font(.title)
+                        .foregroundStyle(.secondary)
+                }
+                        .frame(height: 108)
+                        .frame(maxWidth: .infinity)
+                        .clipped()
+                Text(picture.title).font(.caption.weight(.medium)).lineLimit(2)
+            }
+            .frame(maxWidth: .infinity)
+            .padding(6)
+            .background(Color.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 12))
+        }
+        .buttonStyle(.plain)
+        .accessibilityIdentifier("library-picture-\(picture.title)")
+        .contextMenu {
+            Button("Rename", systemImage: "pencil") {
+                renameDraft = picture.title
+                pictureToRename = picture
+            }
+            Button("Delete", systemImage: "trash", role: .destructive) {
+                pictureToDelete = picture
+            }
+        }
+    }
+
+    @discardableResult
+    private func addPicture(_ data: Data, title: String) async -> Bool {
+        isAddingPicture = true
+        defer { isAddingPicture = false }
+        do {
+            _ = try await store.addPersonalPicture(data, title: title)
+            errorMessage = nil
+            return true
+        } catch {
+            errorMessage = error.localizedDescription
+            return false
+        }
+    }
+}
+
+private struct StarterPictureGalleryView: View {
+    @EnvironmentObject private var store: CommunicationStore
+    @Environment(\.dismiss) private var dismiss
+    let onAdded: () -> Void
+    @State private var searchText = ""
+    @State private var savingPictureID: UUID?
+    @State private var errorMessage: String?
+
+    private static let words = StarterVocabulary.items.filter { !$0.symbol.isEmpty }
+
+    private var visibleWords: [CommunicationItem] {
+        guard !searchText.isEmpty else { return Self.words }
+        return Self.words.filter {
+            $0.label.localizedStandardContains(searchText) || $0.category.localizedStandardContains(searchText)
+        }
+    }
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 14) {
+                    Text("Save a starter picture, then tap it in your library to use it.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                    if let errorMessage {
+                        Text(errorMessage).foregroundStyle(.red).font(.footnote)
+                            .accessibilityIdentifier("starter-gallery-error")
+                    }
+                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 112), spacing: 12)], spacing: 12) {
+                        ForEach(visibleWords) { word in
+                            Button {
+                                Task { await save(word) }
+                            } label: {
+                                VStack(spacing: 4) {
+                                    Text(word.symbol).font(.system(size: 48))
+                                        .frame(height: 62)
+                                    Text(word.label).font(.caption.weight(.semibold)).lineLimit(2)
+                                    Text(word.category).font(.caption2).foregroundStyle(.secondary)
+                                        .lineLimit(1)
+                                }
+                                .frame(maxWidth: .infinity, minHeight: 104)
+                                .padding(8)
+                                .background(Color.secondary.opacity(0.08),
+                                            in: RoundedRectangle(cornerRadius: 12))
+                            }
+                            .buttonStyle(.plain)
+                            .disabled(savingPictureID != nil)
+                            .accessibilityIdentifier("starter-gallery-\(word.category)-\(word.label)")
+                            .accessibilityLabel("\(word.label), \(word.category)")
+                        }
+                    }
+                }
+                .padding()
+            }
+            .navigationTitle("Starter gallery")
+            .toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Done") { dismiss() } } }
+            .searchable(text: $searchText, prompt: "Find a starter picture")
+            .overlay { if savingPictureID != nil { ProgressView("Saving picture") } }
+        }
+    }
+
+    private func save(_ word: CommunicationItem) async {
+        guard savingPictureID == nil else { return }
+        savingPictureID = word.id
+        defer { savingPictureID = nil }
+        guard let data = PhotoProcessing.symbolPictureData(symbol: word.symbol, label: word.label) else {
+            errorMessage = PictureLibraryError.invalidPicture.localizedDescription
+            return
+        }
+        do {
+            _ = try await store.addPersonalPicture(data, title: word.label)
+            onAdded()
+            dismiss()
+        } catch { errorMessage = error.localizedDescription }
+    }
+}
+
+struct PictureLibraryPickerButton: View {
+    let title: String
+    let identifier: String
+    let onSelect: (PersonalPicture) -> Void
+    @State private var showingLibrary = false
+
+    var body: some View {
+        Button(title, systemImage: "photo.on.rectangle.angled") {
+            showingLibrary = true
+        }
+        .accessibilityIdentifier(identifier)
+        .sheet(isPresented: $showingLibrary) {
+            PersonalPictureLibraryView(onSelect: onSelect)
+        }
     }
 }

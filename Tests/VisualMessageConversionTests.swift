@@ -2,6 +2,26 @@ import XCTest
 @testable import OpenVoice
 
 final class VisualMessageConversionTests: XCTestCase {
+    func testLargeVocabularyKeepsLongestMatchAndChosenPicture() {
+        let fillers = (0..<2_500).map { number in
+            CommunicationItem(label: "filler \(number)", symbol: "", message: "filler \(number)",
+                              category: "Custom")
+        }
+        let short = CommunicationItem(label: "I need", symbol: "🙋", message: "I need", category: "Core")
+        let long = CommunicationItem(label: "I need help", symbol: "🆘", message: "I need help", category: "Core")
+        let hidden = CommunicationItem(label: "filler 2499", symbol: "⚠️", message: "filler 2499",
+                                       category: "Custom", visibility: .hidden)
+        let input = Array(repeating: "unknown", count: 80).joined(separator: " ") + " I need help filler 2499"
+        let parts = VisualMessageConversion.convert(input, items: fillers + [short, long, hidden],
+            label: { $0.label }, message: { $0.message }, pictureSelections: [81: .item(short.id)])
+
+        XCTAssertEqual(parts.count, 82)
+        XCTAssertTrue(parts.prefix(80).allSatisfy { $0.itemID == nil })
+        XCTAssertEqual(parts[80].text, "I need help")
+        XCTAssertEqual(parts[80].itemID, long.id)
+        XCTAssertEqual(parts[81].itemID, short.id)
+    }
+
     func testLongestPhraseAndPersonalPhotoWinWhileUnknownWordsStayReadable() {
         let photo = Data([1, 2, 3])
         let phrase = CommunicationItem(label: "help me", symbol: "🙋", message: "help me",
@@ -49,6 +69,19 @@ final class VisualMessageConversionTests: XCTestCase {
         XCTAssertNil(removed[0].itemID)
     }
 
+    func testARASAACPictogramCanReplaceAnUnknownWordWithoutChangingItsText() {
+        let picture = Data([1, 2, 3, 4])
+        let parts = VisualMessageConversion.convert("my own word", items: [],
+            label: { $0.label }, message: { $0.message },
+            pictureSelections: [1: .pictogram(picture, 12345)])
+
+        XCTAssertEqual(parts.map(\.text), ["my", "own", "word"])
+        XCTAssertNil(parts[1].itemID)
+        XCTAssertEqual(parts[1].imageData, picture)
+        XCTAssertEqual(parts[1].arasaacPictogramID, 12345)
+        XCTAssertNil(parts[0].imageData)
+    }
+
     @MainActor
     func testConvertedWordsAppendToPictureDraftWithoutSpeakingAndSurviveRelaunch() {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
@@ -94,5 +127,44 @@ final class VisualMessageConversionTests: XCTestCase {
         try imported.importBackup(store.backupData())
         XCTAssertEqual(imported.composedMessage, "water")
         XCTAssertEqual(imported.pictureMessageTokens.first?.symbol, help.symbol)
+    }
+
+    @MainActor
+    func testARASAACPictogramInMessageSurvivesUndoRelaunchAndBackup() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent("open-voice.json")
+        let picture = Data([1, 2, 3, 4])
+        let store = CommunicationStore(storageURL: url)
+
+        XCTAssertTrue(store.appendVisualMessage("unmatchedword",
+            pictureSelections: [0: .pictogram(picture, 12345)]))
+        XCTAssertEqual(store.pictureMessageTokens.first?.imageData, picture)
+        XCTAssertEqual(store.pictureMessageTokens.first?.arasaacPictogramID, 12345)
+        XCTAssertEqual(store.items.filter { $0.arasaacPictogramID == 12345 }.count, 0)
+
+        store.clearMessage()
+        store.undoClearMessage()
+        XCTAssertEqual(store.pictureMessageTokens.first?.imageData, picture)
+
+        let restored = CommunicationStore(storageURL: url)
+        XCTAssertEqual(restored.pictureMessageTokens.first?.imageData, picture)
+        XCTAssertEqual(restored.pictureMessageTokens.first?.arasaacPictogramID, 12345)
+
+        let imported = CommunicationStore(storageURL: directory.appendingPathComponent("imported.json"))
+        try imported.importBackup(store.backupData())
+        XCTAssertEqual(imported.pictureMessageTokens.first?.imageData, picture)
+        XCTAssertEqual(imported.pictureMessageTokens.first?.arasaacPictogramID, 12345)
+
+        store.beginPrivateConversation()
+        XCTAssertTrue(store.appendVisualMessage("privateword",
+            pictureSelections: [0: .pictogram(Data([9, 8, 7]), 67890)]))
+        let privateBackup = try store.backupData()
+        store.endPrivateConversation()
+        XCTAssertEqual(store.pictureMessageTokens.first?.imageData, picture)
+        let privateImport = CommunicationStore(storageURL: directory.appendingPathComponent("private-import.json"))
+        try privateImport.importBackup(privateBackup)
+        XCTAssertEqual(privateImport.composedMessage, "unmatchedword")
+        XCTAssertEqual(privateImport.pictureMessageTokens.first?.arasaacPictogramID, 12345)
     }
 }

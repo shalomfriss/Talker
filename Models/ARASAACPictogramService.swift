@@ -1,4 +1,5 @@
 import Foundation
+import Photos
 
 struct ARASAACPictogram: Decodable, Identifiable {
     struct Keyword: Decodable {
@@ -25,6 +26,7 @@ enum ARASAACPictogramError: LocalizedError {
     case serviceUnavailable
     case responseTooLarge
     case unreadableImage
+    case photoAccessDenied
 
     var errorDescription: String? {
         switch self {
@@ -32,6 +34,7 @@ enum ARASAACPictogramError: LocalizedError {
         case .serviceUnavailable: "ARASAAC is unavailable. Check your connection and try again."
         case .responseTooLarge: "The pictogram response was too large."
         case .unreadableImage: "This pictogram could not be opened."
+        case .photoAccessDenied: "Allow Open Voice to add photos in Settings, then try again."
         }
     }
 }
@@ -78,9 +81,24 @@ enum ARASAACPictogramService {
             throw ARASAACPictogramError.serviceUnavailable
         }
         guard data.count <= 5 * 1_048_576 else { throw ARASAACPictogramError.responseTooLarge }
-        guard let prepared = PhotoProcessing.preparedData(from: data) else {
+        guard let prepared = await PhotoProcessing.preparedDataAsync(from: data) else {
             throw ARASAACPictogramError.unreadableImage
         }
         return prepared
+    }
+
+    static func saveToPhotos(id: Int) async throws {
+        let status = await withCheckedContinuation { continuation in
+            PHPhotoLibrary.requestAuthorization(for: .addOnly) { authorization in
+                continuation.resume(returning: authorization)
+            }
+        }
+        guard status == .authorized || status == .limited else {
+            throw ARASAACPictogramError.photoAccessDenied
+        }
+        let data = try await download(id: id)
+        try await PHPhotoLibrary.shared().performChanges { @Sendable in
+            PHAssetCreationRequest.forAsset().addResource(with: .photo, data: data, options: nil)
+        }
     }
 }
